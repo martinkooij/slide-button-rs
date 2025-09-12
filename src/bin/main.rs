@@ -22,6 +22,9 @@ use blocking_network_stack::Stack;
 use embedded_io::*;
 use esp_alloc as _;
 
+const SSID: &str = core::env!("SSID");
+const PASSWORD: &str = core::env!("PASSWORD");
+
 use esp_hal::{
     clock::CpuClock,
     main,
@@ -32,7 +35,7 @@ use esp_hal::{
 use esp_println::{print, println};
 use esp_wifi::{
     init,
-    wifi::{AccessPointConfiguration, ClientConfiguration, Configuration},
+    wifi::{ClientConfiguration, Configuration},
 };
 use smoltcp::{
     iface::{SocketSet, SocketStorage},
@@ -47,8 +50,6 @@ esp_bootloader_esp_idf::esp_app_desc!();
 
 #[main]
 fn main() -> ! {
-    const SSID: &str = core::env!("SSID");
-    const PASSWORD: &str = core::env!("PASSWORD");
     esp_println::logger::init_logger(log::LevelFilter::Info);
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
