@@ -24,9 +24,11 @@ use esp_alloc as _;
 
 const SSID: &str = core::env!("SSID");
 const PASSWORD: &str = core::env!("PASSWORD");
+const SLID_IP: &str = "192.168.68.104";
 
 use esp_hal::{
     clock::CpuClock,
+    delay::Delay,
     main,
     rng::Rng,
     time::{self, Duration},
@@ -109,37 +111,44 @@ fn main() -> ! {
     let mut sta_socket = sta_stack.get_socket(&mut sta_rx_buffer, &mut sta_tx_buffer);
 
     println!("Making HTTP request");
-    sta_socket.work();
 
-    sta_socket
-        .open(IpAddress::Ipv4(Ipv4Addr::new(142, 250, 185, 115)), 80)
-        .unwrap();
+    // let postreq = b"\r\nPOST /rpc/Slide.SetPos HTTP/1.1\r\nAccept: */*\r\nContent-Type: application/json\r\nContent-Length: 11\r\n\r\n{\"pos\":0.8}\r\n";
+    let postreq = b"\r\nPOST /rpc/Slide.GetInfo HTTP/1.1\r\nAccept: */*\r\nContent-Type: application/json\r\nContent-Length: 0\r\n\r\n";
 
-    sta_socket
-        .write(b"GET / HTTP/1.0\r\nHost: www.mobile-j.de\r\n\r\n")
-        .unwrap();
-    sta_socket.flush().unwrap();
-
-    let deadline = time::Instant::now() + Duration::from_secs(20);
+    let delay = Delay::new();
     loop {
-        let mut buffer = [0u8; 512];
-        if let Ok(len) = sta_socket.read(&mut buffer) {
-            if len == 0 {
-                break;
+        sta_socket.work();
+        sta_socket.work();
+        println!("Opening socket connection");
+        sta_socket
+            .open(IpAddress::Ipv4(Ipv4Addr::new(192, 168, 68, 104)), 80)
+            .unwrap();
+        println!(
+            "Sending request: {}",
+            core::str::from_utf8(postreq).unwrap()
+        );
+        sta_socket.work();
+        sta_socket.write(postreq).unwrap();
+        sta_socket.flush().unwrap();
+
+        let deadline = time::Instant::now() + Duration::from_secs(20);
+        loop {
+            sta_socket.work();
+            let mut buffer = [0u8; 1024];
+            if let Ok(len) = sta_socket.read(&mut buffer) {
+                println!("\n------------ len is {len} ------------");
+                print!("{}", core::str::from_utf8(&buffer[..len]).unwrap());
+            } else {
+                if time::Instant::now() > deadline {
+                    println!("Timeout");
+                    break;
+                }
             }
-            print!("{}", core::str::from_utf8(&buffer[..len]).unwrap());
-        } else {
-            break;
         }
-
-        if time::Instant::now() > deadline {
-            println!("Timeout");
-            break;
-        }
+        println!("Bye");
+        sta_socket.disconnect();
+        delay.delay_millis(10000u32);
     }
-    println!("Bye");
-
-    sta_socket.disconnect();
 
     println!("Done\n");
     println!();
