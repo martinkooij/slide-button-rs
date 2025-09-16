@@ -113,40 +113,48 @@ fn main() -> ! {
     println!("Making HTTP request");
 
     // let postreq = b"\r\nPOST /rpc/Slide.SetPos HTTP/1.1\r\nAccept: */*\r\nContent-Type: application/json\r\nContent-Length: 11\r\n\r\n{\"pos\":0.8}\r\n";
-    let postreq = b"\r\nPOST /rpc/Slide.GetInfo HTTP/1.1\r\nAccept: */*\r\nContent-Type: application/json\r\nContent-Length: 0\r\n\r\n";
+    let postreq = b"\r\nPOST /rpc/Slide.GetInfo HTTP/1.1\r\nAccept: */*\r\nContent-Type: application/json\r\nConnection: keep-alive\r\nContent-Length: 0\r\n\r\n";
 
     let delay = Delay::new();
+    sta_socket.work();
+    println!("Opening socket connection");
+    sta_socket
+        .open(IpAddress::Ipv4(Ipv4Addr::new(192, 168, 68, 104)), 80)
+        .unwrap();
     loop {
         sta_socket.work();
-        sta_socket.work();
-        println!("Opening socket connection");
-        sta_socket
-            .open(IpAddress::Ipv4(Ipv4Addr::new(192, 168, 68, 104)), 80)
-            .unwrap();
+
         println!(
             "Sending request: {}",
             core::str::from_utf8(postreq).unwrap()
         );
         sta_socket.work();
-        sta_socket.write(postreq).unwrap();
+        match sta_socket.write(postreq) {
+            Ok(len) => println!("Wrote {len} bytes"),
+            Err(e) => {
+                println!("Error on write {e:?}");
+                break;
+            }
+        }
         sta_socket.flush().unwrap();
+        sta_socket.work();
 
         let deadline = time::Instant::now() + Duration::from_secs(20);
         loop {
             sta_socket.work();
             let mut buffer = [0u8; 1024];
             if let Ok(len) = sta_socket.read(&mut buffer) {
-                println!("\n------------ len is {len} ------------");
-                print!("{}", core::str::from_utf8(&buffer[..len]).unwrap());
-            } else {
-                if time::Instant::now() > deadline {
-                    println!("Timeout");
-                    break;
-                }
+                println!("\n------------ len is {len}  ------------");
+                print!("{}", core::str::from_utf8(&buffer[..len]).unwrap()); // there might be more data, continue reading
+                break;
+            };
+            if time::Instant::now() > deadline {
+                println!("Timeout");
+                break;
             }
         }
-        println!("Bye");
-        sta_socket.disconnect();
+        println!("Bye1 socket is still open {}", sta_socket.is_open());
+        //        sta_socket.disconnect();
         delay.delay_millis(10000u32);
     }
 
