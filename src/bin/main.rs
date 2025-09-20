@@ -24,19 +24,15 @@ use esp_alloc as _;
 
 const SSID: &str = core::env!("SSID");
 const PASSWORD: &str = core::env!("PASSWORD");
-const SLID_IP: &str = "192.168.68.104";
+const _SLIDE_IP: &str = "192.168.68.104";
 
 use esp_hal::{
     clock::CpuClock,
     delay::Delay,
-    gpio::{Io, Level, Output, OutputConfig, Pull},
+    gpio::{Level, Output, OutputConfig, Pull},
     main,
     rng::Rng,
-    rtc_cntl::{
-        reset_reason,
-        sleep::{RtcioWakeupSource, TimerWakeupSource, WakeupLevel},
-        wakeup_cause, Rtc, SocResetReason,
-    },
+    rtc_cntl::{sleep::TimerWakeupSource, wakeup_cause, Rtc},
     time::{self, Duration},
     timer::timg::TimerGroup,
 };
@@ -45,6 +41,7 @@ use esp_wifi::{
     init,
     wifi::{ClientConfiguration, Configuration},
 };
+
 use smoltcp::{
     iface::{SocketSet, SocketStorage},
     wire::IpAddress,
@@ -104,6 +101,8 @@ fn main() -> ! {
     let client_config = Configuration::Client(ClientConfiguration {
         ssid: SSID.into(),
         password: PASSWORD.into(),
+        bssid: Some([0x66, 0x32, 0xb1, 0x35, 0xe3, 0x1f]),
+        channel: Some(5),
         ..Default::default()
     });
 
@@ -148,7 +147,7 @@ fn main() -> ! {
         sta_socket
             .open(IpAddress::Ipv4(Ipv4Addr::new(192, 168, 68, 104)), 80)
             .unwrap();
-        for _i in 1..2 {
+        for _i in 1..=2 {
             red_led.set_low();
             sta_socket.work();
 
@@ -190,8 +189,8 @@ fn main() -> ! {
         println!("Done\n");
         sta_socket.close();
         sta_socket.disconnect();
-        controller.disconnect();
-        controller.stop();
+        let _ = controller.disconnect();
+        let _ = controller.stop();
 
         red_led.set_low();
         led6.set_low();
@@ -199,11 +198,10 @@ fn main() -> ! {
         delay.delay_millis(200u32);
         let timer = TimerWakeupSource::new(core::time::Duration::from_secs(15));
         rtc.sleep_deep(&[&timer]);
-        println!("woke up");
     }
 }
 
-fn parse_ip(ip: &str) -> [u8; 4] {
+fn _parse_ip(ip: &str) -> [u8; 4] {
     let mut result = [0u8; 4];
     for (idx, octet) in ip.split(".").into_iter().enumerate() {
         result[idx] = u8::from_str_radix(octet, 10).unwrap();

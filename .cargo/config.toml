@@ -3,6 +3,10 @@ runner = "espflash flash --monitor --chip esp32c3"
 
 [env]
 ESP_LOG="info"
+ESP_WIFI_CONFIG_COUNTRY_CODE = "NL"
+ESP_WIFI_CONFIG_PHY_SKIP_CALIBRATION_AFTER_DEEP_SLEEP = "true"
+
+
 
 [build]
 rustflags = [
