@@ -29,7 +29,7 @@ const _SLIDE_IP: &str = "192.168.68.104";
 use esp_hal::{
     clock::CpuClock,
     delay::Delay,
-    gpio::{Level, Output, OutputConfig, Pull},
+    gpio::{Level, Output, OutputConfig},
     main,
     rng::Rng,
     rtc_cntl::{sleep::TimerWakeupSource, wakeup_cause, Rtc},
@@ -84,39 +84,39 @@ fn main() -> ! {
 
     let mut rng = Rng::new(peripherals.RNG);
 
-    let esp_wifi_ctrl = init(timg0.timer0, rng.clone()).unwrap();
+    let delay = Delay::new();
 
-    let (mut controller, interfaces) =
-        esp_wifi::wifi::new(&esp_wifi_ctrl, peripherals.WIFI).unwrap();
+    {
+        let esp_wifi_ctrl = init(timg0.timer0, rng.clone()).unwrap();
 
-    let mut sta_device = interfaces.sta;
-    let sta_interface = create_interface(&mut sta_device);
-    let now = || time::Instant::now().duration_since_epoch().as_millis();
+        let (mut controller, interfaces) =
+            esp_wifi::wifi::new(&esp_wifi_ctrl, peripherals.WIFI).unwrap();
 
-    let mut sta_socket_set_entries: [SocketStorage; 3] = Default::default();
-    let mut sta_socket_set = SocketSet::new(&mut sta_socket_set_entries[..]);
-    sta_socket_set.add(smoltcp::socket::dhcpv4::Socket::new());
-    let sta_stack = Stack::new(sta_interface, sta_device, sta_socket_set, now, rng.random());
+        let mut sta_device = interfaces.sta;
+        let sta_interface = create_interface(&mut sta_device);
+        let now = || time::Instant::now().duration_since_epoch().as_millis();
 
-    let client_config = Configuration::Client(ClientConfiguration {
-        ssid: SSID.into(),
-        password: PASSWORD.into(),
-        // bssid: Some([0x66, 0x32, 0xb1, 0x35, 0xe3, 0x1f]),
-        // channel: Some(5),
-        // auth_method: esp_wifi::wifi::AuthMethod::WPA2Personal,
-        ..Default::default()
-    });
+        let mut sta_socket_set_entries: [SocketStorage; 3] = Default::default();
+        let mut sta_socket_set = SocketSet::new(&mut sta_socket_set_entries[..]);
+        sta_socket_set.add(smoltcp::socket::dhcpv4::Socket::new());
+        let sta_stack = Stack::new(sta_interface, sta_device, sta_socket_set, now, rng.random());
 
-    let res = controller.set_configuration(&client_config);
-    println!("wifi_set_configuration returned {:?}", res);
+        let client_config = Configuration::Client(ClientConfiguration {
+            ssid: SSID.into(),
+            password: PASSWORD.into(),
+            // bssid: Some([0x66, 0x32, 0xb1, 0x35, 0xe3, 0x1f]),
+            // channel: Some(5),
+            // auth_method: esp_wifi::wifi::AuthMethod::WPA2Personal,
+            ..Default::default()
+        });
 
-    let mut sta_rx_buffer = [0u8; 1536];
-    let mut sta_tx_buffer = [0u8; 1536];
+        let res = controller.set_configuration(&client_config);
+        println!("wifi_set_configuration returned {:?}", res);
 
-    let mut sta_socket = sta_stack.get_socket(&mut sta_rx_buffer, &mut sta_tx_buffer);
+        let mut sta_rx_buffer = [0u8; 1536];
+        let mut sta_tx_buffer = [0u8; 1536];
 
-    loop {
-        green_led.set_high();
+        let mut sta_socket = sta_stack.get_socket(&mut sta_rx_buffer, &mut sta_tx_buffer);
 
         controller.start().unwrap();
 
@@ -149,7 +149,6 @@ fn main() -> ! {
         // let postreq = b"\r\nPOST /rpc/Slide.SetPos HTTP/1.1\r\nAccept: */*\r\nContent-Type: application/json\r\nContent-Length: 11\r\n\r\n{\"pos\":0.8}\r\n";
         let postreq = b"\r\nPOST /rpc/Slide.GetInfo HTTP/1.1\r\nAccept: */*\r\nContent-Type: application/json\r\nConnection: keep-alive\r\nContent-Length: 0\r\n\r\n";
 
-        let delay = Delay::new();
         sta_socket.work();
         println!("Opening socket connection");
         sta_socket
@@ -199,14 +198,14 @@ fn main() -> ! {
         sta_socket.disconnect();
         let _ = controller.disconnect();
         let _ = controller.stop();
+    } // drop wifi and associated resources
 
-        green_led.set_low();
-        red_led.set_low();
-        println!("sleep/delay");
-        delay.delay_millis(200u32);
-        let timer = TimerWakeupSource::new(core::time::Duration::from_secs(15));
-        rtc.sleep_deep(&[&timer]);
-    }
+    green_led.set_low();
+    red_led.set_low();
+    println!("sleep/delay");
+    delay.delay_millis(200u32);
+    let timer = TimerWakeupSource::new(core::time::Duration::from_secs(15));
+    rtc.sleep_deep(&[&timer]);
 }
 
 fn _parse_ip(ip: &str) -> [u8; 4] {
