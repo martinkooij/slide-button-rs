@@ -60,21 +60,21 @@ fn main() -> ! {
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
     let mut rtc = Rtc::new(peripherals.LPWR);
-    let mut red_led = Output::new(peripherals.GPIO8, Level::High, OutputConfig::default());
-    let mut led6 = Output::new(
-        peripherals.GPIO10,
-        Level::Low,
-        OutputConfig::default().with_pull(Pull::None),
-    );
-    led6.set_low();
+    let mut green_led = Output::new(peripherals.GPIO8, Level::Low, OutputConfig::default());
+    let mut red_led = Output::new(peripherals.GPIO10, Level::Low, OutputConfig::default());
+    green_led.set_low();
+    red_led.set_low();
     let wake_reason = wakeup_cause();
     match wake_reason {
         esp_hal::system::SleepSource::Timer => {
             println!("woke up from timer");
-            led6.set_high();
+            red_led.set_high();
+            green_led.set_high();
         }
         _ => {
             println!("not a timer wakeup");
+            green_led.set_high();
+            red_led.set_low();
         }
     }
 
@@ -101,8 +101,9 @@ fn main() -> ! {
     let client_config = Configuration::Client(ClientConfiguration {
         ssid: SSID.into(),
         password: PASSWORD.into(),
-        bssid: Some([0x66, 0x32, 0xb1, 0x35, 0xe3, 0x1f]),
-        channel: Some(5),
+        // bssid: Some([0x66, 0x32, 0xb1, 0x35, 0xe3, 0x1f]),
+        // channel: Some(5),
+        // auth_method: esp_wifi::wifi::AuthMethod::WPA2Personal,
         ..Default::default()
     });
 
@@ -115,11 +116,18 @@ fn main() -> ! {
     let mut sta_socket = sta_stack.get_socket(&mut sta_rx_buffer, &mut sta_tx_buffer);
 
     loop {
-        red_led.set_high();
+        green_led.set_high();
+
         controller.start().unwrap();
+
         println!("is wifi started: {:?}", controller.is_started());
 
         println!("{:?}", controller.capabilities());
+
+        // unsafe {
+        //     let r = esp_wifi_sys::include::esp_wifi_set_max_tx_power(8);
+        //     log::warn!("Set max WiFi power result {:?}", r);
+        // }
 
         println!("wifi_connect {:?}", controller.connect());
 
@@ -148,7 +156,7 @@ fn main() -> ! {
             .open(IpAddress::Ipv4(Ipv4Addr::new(192, 168, 68, 104)), 80)
             .unwrap();
         for _i in 1..=2 {
-            red_led.set_low();
+            green_led.set_low();
             sta_socket.work();
 
             println!(
@@ -183,7 +191,7 @@ fn main() -> ! {
             println!("Bye1 socket is still open {}", sta_socket.is_open());
             //        sta_socket.disconnect();
             delay.delay_millis(3000u32);
-            red_led.set_high();
+            green_led.set_high();
             delay.delay_millis(500u32);
         }
         println!("Done\n");
@@ -192,8 +200,8 @@ fn main() -> ! {
         let _ = controller.disconnect();
         let _ = controller.stop();
 
+        green_led.set_low();
         red_led.set_low();
-        led6.set_low();
         println!("sleep/delay");
         delay.delay_millis(200u32);
         let timer = TimerWakeupSource::new(core::time::Duration::from_secs(15));
