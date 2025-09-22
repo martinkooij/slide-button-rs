@@ -125,7 +125,7 @@ fn main() -> ! {
         println!("{:?}", controller.capabilities());
 
         // unsafe {
-        //     let r = esp_wifi_sys::include::esp_wifi_set_max_tx_power(8);
+        //     let r = esp_wifi_sys::include::esp_wifi_set_max_tx_power(80);
         //     log::warn!("Set max WiFi power result {:?}", r);
         // }
 
