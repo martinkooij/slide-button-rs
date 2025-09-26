@@ -160,12 +160,12 @@ fn main() -> ! {
         println!("Making HTTP request");
 
         // let postreq = b"\r\nPOST /rpc/Slide.SetPos HTTP/1.1\r\nAccept: */*\r\nContent-Type: application/json\r\nContent-Length: 11\r\n\r\n{\"pos\":0.8}\r\n";
-        let postreq = b"\r\nPOST /rpc/Slide.GetInfo HTTP/1.1\r\nAccept: */*\r\nContent-Type: application/json\r\nConnection: keep-alive\r\nContent-Length: 0\r\n\r\n";
+        let postreq = b"GET / HTTP/1.0\r\nHost: www.mobile-j.de\r\nConnection: keep-alive\r\n\r\n";
 
         sta_socket.work();
         println!("Opening socket connection");
         sta_socket
-            .open(IpAddress::Ipv4(Ipv4Addr::new(192, 168, 68, 104)), 80)
+            .open(IpAddress::Ipv4(Ipv4Addr::new(142, 250, 185, 115)), 80)
             .unwrap();
         for _i in 1..=2 {
             green_led.set_low();
