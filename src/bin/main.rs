@@ -104,7 +104,7 @@ fn main() -> ! {
         let client_config = Configuration::Client(ClientConfiguration {
             ssid: SSID.into(),
             password: PASSWORD.into(),
-            // bssid: Some([0x66, 0x32, 0xb1, 0x35, 0xe3, 0x1f]),
+            // bssid: Some([0xXX, 0xXX, 0xXX, 0xXX, 0xXX, 0xXX]),
             // channel: Some(5),
             // auth_method: esp_wifi::wifi::AuthMethod::WPA2Personal,
             ..Default::default()
@@ -129,7 +129,20 @@ fn main() -> ! {
         //     log::warn!("Set max WiFi power result {:?}", r);
         // }
 
-        println!("wifi_connect {:?}", controller.connect());
+        println!("wifi_connecting... {:?}", controller.connect());
+        // wait to get connected
+
+        loop {
+            match controller.is_connected() {
+                Ok(true) => break,
+                Ok(false) => {}
+                Err(err) => {
+                    println!("{:?}", err);
+                    loop {}
+                }
+            }
+        }
+        println!("Wifi connected");
 
         // wait for STA getting an ip address
         println!("Wait to get an ip address");
