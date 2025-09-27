@@ -109,7 +109,7 @@ fn main() -> ! {
             // auth_method: esp_wifi::wifi::AuthMethod::WPA2Personal,
             ..Default::default()
         });
-
+        println!("using wifi with ssid {} password {}", SSID, PASSWORD);
         let res = controller.set_configuration(&client_config);
         println!("wifi_set_configuration returned {:?}", res);
 
@@ -167,7 +167,7 @@ fn main() -> ! {
         sta_socket
             .open(IpAddress::Ipv4(Ipv4Addr::new(142, 250, 185, 115)), 80)
             .unwrap();
-        for _i in 1..=2 {
+        for _i in 1..=1 {
             green_led.set_low();
             sta_socket.work();
 
