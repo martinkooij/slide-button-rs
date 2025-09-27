@@ -99,6 +99,7 @@ fn main() -> ! {
         let mut sta_socket_set_entries: [SocketStorage; 3] = Default::default();
         let mut sta_socket_set = SocketSet::new(&mut sta_socket_set_entries[..]);
         sta_socket_set.add(smoltcp::socket::dhcpv4::Socket::new());
+        // let seed = (rng.random() as u64) << 32 | rng.random() as u64;
         let sta_stack = Stack::new(sta_interface, sta_device, sta_socket_set, now, rng.random());
 
         let client_config = Configuration::Client(ClientConfiguration {
@@ -131,7 +132,6 @@ fn main() -> ! {
 
         println!("wifi_connecting... {:?}", controller.connect());
         // wait to get connected
-
         loop {
             match controller.is_connected() {
                 Ok(true) => break,
