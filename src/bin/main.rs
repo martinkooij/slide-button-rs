@@ -131,6 +131,7 @@ fn main() -> ! {
         // }
 
         println!("wifi_connecting... {:?}", controller.connect());
+        green_led.set_low();
         // wait to get connected
         loop {
             match controller.is_connected() {
@@ -143,6 +144,7 @@ fn main() -> ! {
             }
         }
         println!("Wifi connected");
+        green_led.set_high();
 
         // wait for STA getting an ip address
         println!("Wait to get an ip address");
