@@ -99,8 +99,8 @@ fn main() -> ! {
         let mut sta_socket_set_entries: [SocketStorage; 3] = Default::default();
         let mut sta_socket_set = SocketSet::new(&mut sta_socket_set_entries[..]);
         sta_socket_set.add(smoltcp::socket::dhcpv4::Socket::new());
-        // let seed = (rng.random() as u64) << 32 | rng.random() as u64;
-        let sta_stack = Stack::new(sta_interface, sta_device, sta_socket_set, now, rng.random());
+        let seed = rng.random() ^ rtc.current_time_us() as u32;
+        let sta_stack = Stack::new(sta_interface, sta_device, sta_socket_set, now, seed);
 
         let client_config = Configuration::Client(ClientConfiguration {
             ssid: SSID.into(),
@@ -111,6 +111,7 @@ fn main() -> ! {
             ..Default::default()
         });
         println!("using wifi with ssid {} password {}", SSID, PASSWORD);
+        println!("rtc time = {:?}", rtc.current_time_us());
         let res = controller.set_configuration(&client_config);
         println!("wifi_set_configuration returned {:?}", res);
 
