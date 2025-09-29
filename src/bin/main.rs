@@ -44,6 +44,8 @@ use esp_wifi::{
 
 use smoltcp::{
     iface::{SocketSet, SocketStorage},
+    socket::dhcpv4::{RetryConfig, Socket as Dhcpv4Socket},
+    time::Duration as SmolDuration,
     wire::IpAddress,
 };
 
@@ -98,7 +100,11 @@ fn main() -> ! {
 
         let mut sta_socket_set_entries: [SocketStorage; 3] = Default::default();
         let mut sta_socket_set = SocketSet::new(&mut sta_socket_set_entries[..]);
-        sta_socket_set.add(smoltcp::socket::dhcpv4::Socket::new());
+        let mut my_socket = Dhcpv4Socket::new();
+        let mut retry_config = RetryConfig::default();
+        retry_config.discover_timeout = SmolDuration::from_millis(500);
+        my_socket.set_retry_config(retry_config);
+        sta_socket_set.add(my_socket);
         let seed = rng.random() ^ rtc.current_time_us() as u32;
         let sta_stack = Stack::new(sta_interface, sta_device, sta_socket_set, now, seed);
 
