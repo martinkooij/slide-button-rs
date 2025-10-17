@@ -1,62 +1,42 @@
-//! Access point with station
-//!
-//! Set SSID and PASSWORD env variable before running this example.
-//!
-//! Gets an ip address via DHCP, creates an open access-point with SSID
-//! `esp-wifi` You can connect to it using a static IP in range 192.168.2.2 ..
-//! 192.168.2.255, gateway 192.168.2.1 Open http://192.168.2.1:8080/ in your browser - the example will perform an HTTP get request to some "random" server
-//!
-//! On Android you might need to choose _Keep Accesspoint_ when it tells you the
-//! WiFi has no internet connection, Chrome might not want to load the URL - you
-//! can use a shell and try `curl` and `ping`
-
-//% FEATURES: esp-wifi esp-wifi/wifi esp-wifi/smoltcp esp-hal/unstable
-//% CHIPS: esp32 esp32s2 esp32s3 esp32c2 esp32c3 esp32c6
-
 #![no_std]
 #![no_main]
 
+extern crate alloc;
 use core::net::Ipv4Addr;
 
 use blocking_network_stack::Stack;
 use embedded_io::*;
 use esp_alloc as _;
-
-const SSID: &str = core::env!("SSID");
-const PASSWORD: &str = core::env!("PASSWORD");
-const _SLIDE_IP: &str = "192.168.68.104";
-
+use esp_backtrace as _;
+use esp_hal::interrupt::software::SoftwareInterruptControl;
 use esp_hal::{
     clock::CpuClock,
     delay::Delay,
     gpio::{Level, Output, OutputConfig},
-    main,
+    main, ram,
     rng::Rng,
     rtc_cntl::{sleep::TimerWakeupSource, wakeup_cause, Rtc},
     time::{self, Duration},
     timer::timg::TimerGroup,
 };
 use esp_println::{print, println};
-use esp_wifi::{
-    init,
-    wifi::{ClientConfiguration, Configuration},
-};
-
+use esp_radio::wifi::{ClientConfig, ModeConfig};
 use smoltcp::{
     iface::{SocketSet, SocketStorage},
-    wire::IpAddress,
+    socket::dhcpv4::{RetryConfig, Socket as Dhcpv4Socket},
+    time::Duration as SmolDuration,
+    wire::{DhcpOption, IpAddress},
 };
-
-#[panic_handler]
-fn panic(_: &core::panic::PanicInfo) -> ! {
-    loop {}
-}
 
 esp_bootloader_esp_idf::esp_app_desc!();
 
+const SSID: &str = env!("SSID");
+const PASSWORD: &str = env!("PASSWORD");
+const _SLIDE_IP: &str = "192.168.68.104";
+
 #[main]
 fn main() -> ! {
-    esp_println::logger::init_logger(log::LevelFilter::Info);
+    esp_println::logger::init_logger_from_env();
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
     let mut rtc = Rtc::new(peripherals.LPWR);
@@ -77,61 +57,64 @@ fn main() -> ! {
             red_led.set_low();
         }
     }
-
-    esp_alloc::heap_allocator!(size: 72 * 1024);
+    esp_alloc::heap_allocator!(#[ram(reclaimed)] size: 64 * 1024);
+    esp_alloc::heap_allocator!(size: 36 * 1024);
 
     let timg0 = TimerGroup::new(peripherals.TIMG0);
-
-    let mut rng = Rng::new(peripherals.RNG);
-
+    #[cfg(target_arch = "riscv32")]
+    let sw_int = SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
+    esp_rtos::start(
+        timg0.timer0,
+        #[cfg(target_arch = "riscv32")]
+        sw_int.software_interrupt0,
+    );
     let delay = Delay::new();
 
     {
-        let esp_wifi_ctrl = init(timg0.timer0, rng.clone()).unwrap();
+        let esp_radio_ctrl = esp_radio::init().unwrap();
 
         let (mut controller, interfaces) =
-            esp_wifi::wifi::new(&esp_wifi_ctrl, peripherals.WIFI).unwrap();
+            esp_radio::wifi::new(&esp_radio_ctrl, peripherals.WIFI, Default::default()).unwrap();
 
         let mut sta_device = interfaces.sta;
-        let sta_interface = create_interface(&mut sta_device);
+        let sta_iface = create_interface(&mut sta_device);
+
+        let mut socket_set_entries: [SocketStorage; 3] = Default::default();
+        let mut socket_set = SocketSet::new(&mut socket_set_entries[..]);
+        let mut dhcp_socket = Dhcpv4Socket::new();
+        let mut retry_config = RetryConfig::default();
+        retry_config.discover_timeout = SmolDuration::from_millis(500);
+        dhcp_socket.set_retry_config(retry_config);
+        // we can set a hostname here (or add other DHCP options)
+        dhcp_socket.set_outgoing_options(&[DhcpOption {
+            kind: 12,
+            data: b"esp-slide-button",
+        }]);
+        socket_set.add(dhcp_socket);
+
+        let rng = Rng::new();
         let now = || time::Instant::now().duration_since_epoch().as_millis();
+        let stack = Stack::new(sta_iface, sta_device, socket_set, now, rng.random());
 
-        let mut sta_socket_set_entries: [SocketStorage; 3] = Default::default();
-        let mut sta_socket_set = SocketSet::new(&mut sta_socket_set_entries[..]);
-        sta_socket_set.add(smoltcp::socket::dhcpv4::Socket::new());
-        let sta_stack = Stack::new(sta_interface, sta_device, sta_socket_set, now, rng.random());
+        controller
+            .set_power_saving(esp_radio::wifi::PowerSaveMode::None)
+            .unwrap();
 
-        let client_config = Configuration::Client(ClientConfiguration {
-            ssid: SSID.into(),
-            password: PASSWORD.into(),
-            // bssid: Some([0xXX, 0xXX, 0xXX, 0xXX, 0xXX, 0xXX]),
-            // channel: Some(5),
-            // auth_method: esp_wifi::wifi::AuthMethod::WPA2Personal,
-            ..Default::default()
-        });
-
-        let res = controller.set_configuration(&client_config);
+        let client_config = ModeConfig::Client(
+            ClientConfig::default()
+                .with_ssid(SSID.into())
+                .with_password(PASSWORD.into()),
+        );
+        let res = controller.set_config(&client_config);
         println!("wifi_set_configuration returned {:?}", res);
 
-        let mut sta_rx_buffer = [0u8; 1536];
-        let mut sta_tx_buffer = [0u8; 1536];
-
-        let mut sta_socket = sta_stack.get_socket(&mut sta_rx_buffer, &mut sta_tx_buffer);
-
         controller.start().unwrap();
-
         println!("is wifi started: {:?}", controller.is_started());
 
         println!("{:?}", controller.capabilities());
+        println!("wifi connecting... {:?}", controller.connect());
 
-        // unsafe {
-        //     let r = esp_wifi_sys::include::esp_wifi_set_max_tx_power(80);
-        //     log::warn!("Set max WiFi power result {:?}", r);
-        // }
-
-        println!("wifi_connecting... {:?}", controller.connect());
         // wait to get connected
-
         loop {
             match controller.is_connected() {
                 Ok(true) => break,
@@ -142,18 +125,24 @@ fn main() -> ! {
                 }
             }
         }
-        println!("Wifi connected");
+        println!("Wifi connected:{:?}", controller.is_connected());
 
-        // wait for STA getting an ip address
+        // wait for getting an ip address
         println!("Wait to get an ip address");
         loop {
-            sta_stack.work();
+            stack.work();
 
-            if sta_stack.is_iface_up() {
-                println!("got ip {:?}", sta_stack.get_ip_info());
+            if stack.is_iface_up() {
+                println!("got ip {:?}", stack.get_ip_info());
                 break;
             }
         }
+
+        println!("Start busy loop on main");
+
+        let mut rx_buffer = [0u8; 1536];
+        let mut tx_buffer = [0u8; 1536];
+        let mut socket = stack.get_socket(&mut rx_buffer, &mut tx_buffer);
 
         println!("Start  main work.");
 
@@ -162,35 +151,38 @@ fn main() -> ! {
         // let postreq = b"\r\nPOST /rpc/Slide.SetPos HTTP/1.1\r\nAccept: */*\r\nContent-Type: application/json\r\nContent-Length: 11\r\n\r\n{\"pos\":0.8}\r\n";
         let postreq = b"\r\nPOST /rpc/Slide.GetInfo HTTP/1.1\r\nAccept: */*\r\nContent-Type: application/json\r\nConnection: keep-alive\r\nContent-Length: 0\r\n\r\n";
 
-        sta_socket.work();
+        socket.work();
         println!("Opening socket connection");
-        sta_socket
+
+        socket.work();
+
+        socket
             .open(IpAddress::Ipv4(Ipv4Addr::new(192, 168, 68, 104)), 80)
             .unwrap();
         for _i in 1..=2 {
             green_led.set_low();
-            sta_socket.work();
+            socket.work();
 
             println!(
                 "Sending request: {}",
                 core::str::from_utf8(postreq).unwrap()
             );
-            sta_socket.work();
-            match sta_socket.write(postreq) {
+            socket.work();
+            match socket.write(postreq) {
                 Ok(len) => println!("Wrote {len} bytes"),
                 Err(e) => {
                     println!("Error on write {e:?}");
                     break;
                 }
             }
-            sta_socket.flush().unwrap();
-            sta_socket.work();
+            socket.flush().unwrap();
+            socket.work();
 
             let deadline = time::Instant::now() + Duration::from_secs(20);
             loop {
-                sta_socket.work();
+                socket.work();
                 let mut buffer = [0u8; 1024];
-                if let Ok(len) = sta_socket.read(&mut buffer) {
+                if let Ok(len) = socket.read(&mut buffer) {
                     println!("\n------------ len is {len}  ------------");
                     print!("{}", core::str::from_utf8(&buffer[..len]).unwrap()); // there might be more data, continue reading
                     break;
@@ -200,33 +192,24 @@ fn main() -> ! {
                     break;
                 }
             }
-            println!("Bye1 socket is still open {}", sta_socket.is_open());
+            println!("Bye1 socket is still open {}", socket.is_open());
             //        sta_socket.disconnect();
             delay.delay_millis(3000u32);
             green_led.set_high();
             delay.delay_millis(500u32);
         }
         println!("Done\n");
-        sta_socket.close();
-        sta_socket.disconnect();
+        socket.close();
+        socket.disconnect();
         let _ = controller.disconnect();
         let _ = controller.stop();
-    } // drop wifi and associated resources
-
+    } //drop wifi and associated resources
     green_led.set_low();
     red_led.set_low();
-    println!("sleep/delay");
+    println!("sleep/delay starts now");
     delay.delay_millis(200u32);
     let timer = TimerWakeupSource::new(core::time::Duration::from_secs(15));
     rtc.sleep_deep(&[&timer]);
-}
-
-fn _parse_ip(ip: &str) -> [u8; 4] {
-    let mut result = [0u8; 4];
-    for (idx, octet) in ip.split(".").into_iter().enumerate() {
-        result[idx] = u8::from_str_radix(octet, 10).unwrap();
-    }
-    result
 }
 
 // some smoltcp boilerplate
@@ -238,7 +221,7 @@ fn timestamp() -> smoltcp::time::Instant {
     )
 }
 
-pub fn create_interface(device: &mut esp_wifi::wifi::WifiDevice) -> smoltcp::iface::Interface {
+pub fn create_interface(device: &mut esp_radio::wifi::WifiDevice) -> smoltcp::iface::Interface {
     // users could create multiple instances but since they only have one WifiDevice
     // they probably can't do anything bad with that
     smoltcp::iface::Interface::new(

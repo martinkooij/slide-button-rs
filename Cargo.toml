@@ -1,49 +1,46 @@
 [package]
-edition      = "2021"
-name         = "my-wifi"
-#  rust-version = "1.86"
-version      = "0.1.0"
+edition      = "2024"
+name         = "slide-button-rs"
+rust-version = "1.88"
+version      = "0.2.0"
 
 [[bin]]
-name = "my-wifi"
+name = "slide-button-rs"
 path = "./src/bin/main.rs"
 
 [dependencies]
-esp-bootloader-esp-idf = { version = "0.2.0", features = ["esp32c3"] }
-esp-hal = { version = "=1.0.0-rc.0", features = [
+esp-hal = { version = "=1.0.0-rc.1", features = [
   "esp32c3",
   "log-04",
   "unstable",
 ] }
-log = "0.4.27"
 
-embassy-net = { version = "0.7.0", features = [
-  "dhcpv4",
-  "log",
-  "medium-ethernet",
-  "tcp",
-  "udp",
+esp-rtos = { version = "0.1.1", features = [
+  "esp-alloc",
+  "esp-radio",
+  "esp32c3",
+  "log-04",
 ] }
-embedded-io = "0.6.1"
-embedded-io-async = "0.6.1"
-esp-alloc = "0.8.0"
-esp-println = { version = "0.15.0", features = ["esp32c3", "log-04"] }
-# for more networking protocol support see https://crates.io/crates/edge-net
+
+esp-bootloader-esp-idf = { version = "0.3.0", features = ["esp32c3"] }
+log                    = "0.4.27"
+
 critical-section = "1.2.0"
-embassy-executor = { version = "0.7.0", features = [
-  "log",
-  "task-arena-size-20480",
+embedded-io = { version = "0.6.1", default-features = false }
+esp-alloc = "0.9.0"
+esp-backtrace = { version = "0.18.0", features = [
+  "esp32c3",
+  "panic-handler",
+  "println",
 ] }
-embassy-time = { version = "0.4.0", features = ["log"] }
-esp-hal-embassy = { version = "0.9.0", features = ["esp32c3", "log-04"] }
-esp-wifi = { version = "0.15.0", features = [
-  "builtin-scheduler",
+esp-println = { version = "0.16.0", features = ["esp32c3", "log-04"] }
+esp-radio = { version = "0.16.0", features = [
   "esp-alloc",
   "esp32c3",
   "log-04",
   "smoltcp",
+  "unstable",
   "wifi",
-# "sys-logs",
 ] }
 smoltcp = { version = "0.12.0", default-features = false, features = [
   "log",
@@ -58,17 +55,8 @@ smoltcp = { version = "0.12.0", default-features = false, features = [
   "socket-tcp",
   "socket-udp",
 ] }
-static_cell = "2.1.1"
-blocking-network-stack = { git = "https://github.com/bjoernQ/blocking-network-stack.git", rev = "b3ecefc222d8806edd221f266999ca339c52d34e" }
-cfg-if              = "1.0.0"
-esp-wifi-sys = "0.7.1"
+blocking-network-stack = { git = "https://github.com/bjoernQ/blocking-network-stack.git", rev = "b3ecefc" }
 
-
-[profile.dev.package.esp-wifi]
-opt-level = 3
-
-[profile.release.package.esp-wifi]
-opt-level = 3
 
 [profile.dev]
 # Rust debug is too slow.
