@@ -12,10 +12,15 @@ use esp_hal::interrupt::software::SoftwareInterruptControl;
 use esp_hal::{
     clock::CpuClock,
     delay::Delay,
-    gpio::{Level, Output, OutputConfig},
+    gpio::{self, Input, InputConfig, Level, Output, OutputConfig, Pull},
     main, ram,
     rng::Rng,
-    rtc_cntl::{sleep::TimerWakeupSource, wakeup_cause, Rtc},
+    rtc_cntl::{
+        Rtc, SocResetReason, reset_reason,
+        sleep::{RtcioWakeupSource, TimerWakeupSource, WakeupLevel},
+        wakeup_cause,
+    },
+    system::Cpu,
     time::{self, Duration},
     timer::timg::TimerGroup,
 };
@@ -42,12 +47,21 @@ fn main() -> ! {
     let mut rtc = Rtc::new(peripherals.LPWR);
     let mut green_led = Output::new(peripherals.GPIO8, Level::Low, OutputConfig::default());
     let mut red_led = Output::new(peripherals.GPIO10, Level::Low, OutputConfig::default());
+    let mut pin2 = peripherals.GPIO2;
     green_led.set_low();
     red_led.set_low();
+    let reason = reset_reason(Cpu::ProCpu).unwrap_or(SocResetReason::ChipPowerOn);
     let wake_reason = wakeup_cause();
+    println!("reset reason: {:?}", reason);
+    println!("wake reason: {:?}", wake_reason);
     match wake_reason {
         esp_hal::system::SleepSource::Timer => {
             println!("woke up from timer");
+            red_led.set_high();
+            green_led.set_high();
+        }
+        esp_hal::system::SleepSource::Gpio => {
+            println!("woke up from gpio");
             red_led.set_high();
             green_led.set_high();
         }
@@ -69,6 +83,12 @@ fn main() -> ! {
         sw_int.software_interrupt0,
     );
     let delay = Delay::new();
+    let config = InputConfig::default().with_pull(Pull::None);
+    let _pin2_input = Input::new(pin2.reborrow(), config);
+    let wakeup_pins: &mut [(&mut dyn gpio::RtcPinWithResistors, WakeupLevel)] =
+        &mut [(&mut pin2, WakeupLevel::Low)];
+
+    let rtcio = RtcioWakeupSource::new(wakeup_pins);
 
     {
         let esp_radio_ctrl = esp_radio::init().unwrap();
@@ -206,10 +226,10 @@ fn main() -> ! {
     } //drop wifi and associated resources
     green_led.set_low();
     red_led.set_low();
-    println!("sleep/delay starts now");
+    println!("sleep/delay or wait for button starts now");
     delay.delay_millis(200u32);
     let timer = TimerWakeupSource::new(core::time::Duration::from_secs(15));
-    rtc.sleep_deep(&[&timer]);
+    rtc.sleep_deep(&[&timer, &rtcio]);
 }
 
 // some smoltcp boilerplate
