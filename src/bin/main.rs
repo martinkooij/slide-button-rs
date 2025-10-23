@@ -30,6 +30,7 @@ macro_rules! timed_loop {
 
 extern crate alloc;
 use core::net::Ipv4Addr;
+use core::str::FromStr;
 
 use blocking_network_stack::Stack;
 use embedded_io::*;
@@ -68,7 +69,7 @@ fn panic(_: &core::panic::PanicInfo) -> ! {
 }
 const SSID: &str = env!("SSID");
 const PASSWORD: &str = env!("PASSWORD");
-const _SLIDE_IP: &str = "192.168.68.104";
+const SLIDE_IP: &str = "192.168.68.104";
 
 #[main]
 fn main() -> ! {
@@ -209,13 +210,18 @@ fn main() -> ! {
             peripherals.GPIO2.reborrow(),
             InputConfig::default().with_pull(Pull::Up),
         );
-        slide_communication(
+        let success = slide_communication(
             &mut socket,
             &mut green_led,
             &mut red_led,
             &mut button_pin_input,
         );
+        // just to be sure ;-)
         core::mem::drop(button_pin_input);
+
+        if !success {
+            break 'wifi;
+        };
 
         let _ = controller.disconnect();
         let _ = controller.stop();
@@ -259,7 +265,7 @@ fn slide_communication<'a, 's, 'n, D: smoltcp::phy::Device>(
     green_led: &mut Output<'a>,
     red_led: &mut Output<'a>,
     button_pin: &mut Input<'a>,
-) {
+) -> bool {
     let delay = Delay::new();
     println!("Making HTTP request");
 
@@ -271,9 +277,14 @@ fn slide_communication<'a, 's, 'n, D: smoltcp::phy::Device>(
     check_button_pressed(button_pin, red_led);
     socket.work();
 
-    socket
-        .open(IpAddress::Ipv4(Ipv4Addr::new(192, 168, 68, 104)), 80)
-        .unwrap();
+    if socket
+        .open(IpAddress::Ipv4(Ipv4Addr::from_str(SLIDE_IP).unwrap()), 80)
+        .is_err()
+    {
+        println!("Error opening socket");
+        return false;
+    }
+
     for _i in 1..=2 {
         green_led.set_low();
         socket.work();
@@ -288,7 +299,7 @@ fn slide_communication<'a, 's, 'n, D: smoltcp::phy::Device>(
             Ok(len) => println!("Wrote {len} bytes"),
             Err(e) => {
                 println!("Error on write {e:?}");
-                break;
+                return false;
             }
         }
         socket.flush().unwrap();
@@ -323,6 +334,7 @@ fn slide_communication<'a, 's, 'n, D: smoltcp::phy::Device>(
     socket.close();
     socket.disconnect();
     println!("Done\n");
+    true
 }
 
 //some smoltcp boilerplate
