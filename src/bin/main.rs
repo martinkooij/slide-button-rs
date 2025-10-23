@@ -7,7 +7,6 @@ use core::net::Ipv4Addr;
 use blocking_network_stack::Stack;
 use embedded_io::*;
 use esp_alloc as _;
-use esp_backtrace as _;
 use esp_hal::interrupt::software::SoftwareInterruptControl;
 use esp_hal::{
     clock::CpuClock,
@@ -17,7 +16,7 @@ use esp_hal::{
     rng::Rng,
     rtc_cntl::{
         Rtc, SocResetReason, reset_reason,
-        sleep::{RtcioWakeupSource, TimerWakeupSource, WakeupLevel},
+        sleep::{RtcioWakeupSource, TimerWakeupSource, WakeSource, WakeupLevel},
         wakeup_cause,
     },
     system::Cpu,
@@ -26,6 +25,7 @@ use esp_hal::{
 };
 use esp_println::{print, println};
 use esp_radio::wifi::{ClientConfig, ModeConfig};
+use esp_rtos as _;
 use smoltcp::{
     iface::{SocketSet, SocketStorage},
     socket::dhcpv4::{RetryConfig, Socket as Dhcpv4Socket},
@@ -34,7 +34,11 @@ use smoltcp::{
 };
 
 esp_bootloader_esp_idf::esp_app_desc!();
-
+// just do a reset on panic
+#[panic_handler]
+fn panic(_: &core::panic::PanicInfo) -> ! {
+    esp_hal::system::software_reset()
+}
 const SSID: &str = env!("SSID");
 const PASSWORD: &str = env!("PASSWORD");
 const _SLIDE_IP: &str = "192.168.68.104";
@@ -43,11 +47,11 @@ const _SLIDE_IP: &str = "192.168.68.104";
 fn main() -> ! {
     esp_println::logger::init_logger_from_env();
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
-    let peripherals = esp_hal::init(config);
+    let mut peripherals = esp_hal::init(config);
     let mut rtc = Rtc::new(peripherals.LPWR);
     let mut green_led = Output::new(peripherals.GPIO8, Level::Low, OutputConfig::default());
     let mut red_led = Output::new(peripherals.GPIO10, Level::Low, OutputConfig::default());
-    let mut pin2 = peripherals.GPIO2;
+
     green_led.set_low();
     red_led.set_low();
     let reason = reset_reason(Cpu::ProCpu).unwrap_or(SocResetReason::ChipPowerOn);
@@ -83,14 +87,12 @@ fn main() -> ! {
         sw_int.software_interrupt0,
     );
     let delay = Delay::new();
-    let config = InputConfig::default().with_pull(Pull::None);
-    let _pin2_input = Input::new(pin2.reborrow(), config);
-    let wakeup_pins: &mut [(&mut dyn gpio::RtcPinWithResistors, WakeupLevel)] =
-        &mut [(&mut pin2, WakeupLevel::Low)];
 
-    let rtcio = RtcioWakeupSource::new(wakeup_pins);
-
-    {
+    // All configurations are now set
+    // Open a block that uses the memory to execute wifi. Leaving the block
+    // will gracefully shut down the wifi driver and free associated resources
+    // to prevent problems at waking up from (deep) sleep.
+    'wifi: {
         let esp_radio_ctrl = esp_radio::init().unwrap();
 
         let (mut controller, interfaces) =
@@ -134,105 +136,159 @@ fn main() -> ! {
         println!("{:?}", controller.capabilities());
         println!("wifi connecting... {:?}", controller.connect());
 
-        // wait to get connected
+        // wait to get connected, no longer then 12 seconds
+        let deadline = time::Instant::now() + Duration::from_secs(5);
         loop {
             match controller.is_connected() {
                 Ok(true) => break,
                 Ok(false) => {}
                 Err(err) => {
                     println!("{:?}", err);
-                    loop {}
+                    delay.delay_millis(2000u32);
                 }
+            }
+            if time::Instant::now() > deadline {
+                println!("Timeout connecting to wifi");
+                break 'wifi;
             }
         }
         println!("Wifi connected:{:?}", controller.is_connected());
 
         // wait for getting an ip address
         println!("Wait to get an ip address");
+        let deadline = time::Instant::now() + Duration::from_secs(12);
         loop {
             stack.work();
-
             if stack.is_iface_up() {
                 println!("got ip {:?}", stack.get_ip_info());
                 break;
             }
+            if time::Instant::now() > deadline {
+                println!("Timeout getting IP address");
+                break 'wifi;
+            }
         }
-
-        println!("Start busy loop on main");
 
         let mut rx_buffer = [0u8; 1536];
         let mut tx_buffer = [0u8; 1536];
         let mut socket = stack.get_socket(&mut rx_buffer, &mut tx_buffer);
 
         println!("Start  main work.");
+        let mut button_pin_input = Input::new(
+            peripherals.GPIO2.reborrow(),
+            InputConfig::default().with_pull(Pull::Up),
+        );
+        slide_communication(
+            &mut socket,
+            &mut green_led,
+            &mut red_led,
+            &mut button_pin_input,
+        );
+        core::mem::drop(button_pin_input);
 
-        println!("Making HTTP request");
-
-        // let postreq = b"\r\nPOST /rpc/Slide.SetPos HTTP/1.1\r\nAccept: */*\r\nContent-Type: application/json\r\nContent-Length: 11\r\n\r\n{\"pos\":0.8}\r\n";
-        let postreq = b"\r\nPOST /rpc/Slide.GetInfo HTTP/1.1\r\nAccept: */*\r\nContent-Type: application/json\r\nConnection: keep-alive\r\nContent-Length: 0\r\n\r\n";
-
-        socket.work();
-        println!("Opening socket connection");
-
-        socket.work();
-
-        socket
-            .open(IpAddress::Ipv4(Ipv4Addr::new(192, 168, 68, 104)), 80)
-            .unwrap();
-        for _i in 1..=2 {
-            green_led.set_low();
-            socket.work();
-
-            println!(
-                "Sending request: {}",
-                core::str::from_utf8(postreq).unwrap()
-            );
-            socket.work();
-            match socket.write(postreq) {
-                Ok(len) => println!("Wrote {len} bytes"),
-                Err(e) => {
-                    println!("Error on write {e:?}");
-                    break;
-                }
-            }
-            socket.flush().unwrap();
-            socket.work();
-
-            let deadline = time::Instant::now() + Duration::from_secs(20);
-            loop {
-                socket.work();
-                let mut buffer = [0u8; 1024];
-                if let Ok(len) = socket.read(&mut buffer) {
-                    println!("\n------------ len is {len}  ------------");
-                    print!("{}", core::str::from_utf8(&buffer[..len]).unwrap()); // there might be more data, continue reading
-                    break;
-                };
-                if time::Instant::now() > deadline {
-                    println!("Timeout");
-                    break;
-                }
-            }
-            println!("Bye1 socket is still open {}", socket.is_open());
-            //        sta_socket.disconnect();
-            delay.delay_millis(3000u32);
-            green_led.set_high();
-            delay.delay_millis(500u32);
-        }
-        println!("Done\n");
-        socket.close();
-        socket.disconnect();
         let _ = controller.disconnect();
         let _ = controller.stop();
     } //drop wifi and associated resources
+
     green_led.set_low();
     red_led.set_low();
-    println!("sleep/delay or wait for button starts now");
-    delay.delay_millis(200u32);
-    let timer = TimerWakeupSource::new(core::time::Duration::from_secs(15));
-    rtc.sleep_deep(&[&timer, &rtcio]);
+    let mut button_pin_wake = peripherals.GPIO2.reborrow();
+    let wakeup_pins: &mut [(&mut dyn gpio::RtcPinWithResistors, WakeupLevel)] =
+        &mut [(&mut button_pin_wake, WakeupLevel::Low)];
+
+    let rtcio = RtcioWakeupSource::new(wakeup_pins);
+    goto_deepsleep(&mut rtc, &rtcio);
 }
 
-// some smoltcp boilerplate
+fn goto_deepsleep(rtc: &mut Rtc, pin_wake_source: &dyn WakeSource) -> ! {
+    println!("Going to deep sleep now");
+    Delay::new().delay_millis(100u32);
+    let timer = TimerWakeupSource::new(core::time::Duration::from_secs(15));
+    rtc.sleep_deep(&[&timer, pin_wake_source]);
+}
+
+fn check_button_pressed<'a>(button_pin: &mut Input<'a>, red_led: &mut Output<'a>) {
+    //button is active low
+    if button_pin.is_low() {
+        println!("Button is pressed!");
+        red_led.toggle();
+        loop {
+            if button_pin.is_high() {
+                println!("Button released, exiting loop");
+                break;
+            }
+            Delay::new().delay_millis(50u32);
+        }
+    }
+}
+
+fn slide_communication<'a, 's, 'n, D: smoltcp::phy::Device>(
+    socket: &mut blocking_network_stack::Socket<'s, 'n, D>,
+    green_led: &mut Output<'a>,
+    red_led: &mut Output<'a>,
+    button_pin: &mut Input<'a>,
+) {
+    let delay = Delay::new();
+    println!("Making HTTP request");
+
+    // let postreq = b"\r\nPOST /rpc/Slide.SetPos HTTP/1.1\r\nAccept: */*\r\nContent-Type: application/json\r\nContent-Length: 11\r\n\r\n{\"pos\":0.8}\r\n";
+    let postreq = b"\r\nPOST /rpc/Slide.GetInfo HTTP/1.1\r\nAccept: */*\r\nContent-Type: application/json\r\nConnection: keep-alive\r\nContent-Length: 0\r\n\r\n";
+
+    socket.work();
+    println!("Opening socket connection");
+    check_button_pressed(button_pin, red_led);
+    socket.work();
+
+    socket
+        .open(IpAddress::Ipv4(Ipv4Addr::new(192, 168, 68, 104)), 80)
+        .unwrap();
+    for _i in 1..=2 {
+        green_led.set_low();
+        socket.work();
+        check_button_pressed(button_pin, red_led);
+
+        println!(
+            "Sending request: {}",
+            core::str::from_utf8(postreq).unwrap()
+        );
+        socket.work();
+        match socket.write(postreq) {
+            Ok(len) => println!("Wrote {len} bytes"),
+            Err(e) => {
+                println!("Error on write {e:?}");
+                break;
+            }
+        }
+        socket.flush().unwrap();
+        socket.work();
+        check_button_pressed(button_pin, red_led);
+        let deadline = time::Instant::now() + Duration::from_secs(20);
+        loop {
+            socket.work();
+            check_button_pressed(button_pin, red_led);
+            let mut buffer = [0u8; 1024];
+            if let Ok(len) = socket.read(&mut buffer) {
+                println!("\n------------ len is {len}  ------------");
+                print!("{}", core::str::from_utf8(&buffer[..len]).unwrap()); // there might be more data, continue reading
+                break;
+            };
+            if time::Instant::now() > deadline {
+                println!("Timeout");
+                break;
+            }
+        }
+        println!("Bye1 socket is still open {}", socket.is_open());
+        //        sta_socket.disconnect();
+        delay.delay_millis(3000u32);
+        green_led.set_high();
+        delay.delay_millis(500u32);
+    }
+    socket.close();
+    socket.disconnect();
+    println!("Done\n");
+}
+
+//some smoltcp boilerplate
 fn timestamp() -> smoltcp::time::Instant {
     smoltcp::time::Instant::from_micros(
         esp_hal::time::Instant::now()
