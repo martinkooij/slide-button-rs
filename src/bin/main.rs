@@ -1,5 +1,32 @@
 #![no_std]
 #![no_main]
+macro_rules! timed_loop {
+    ($t:expr,  $b: expr) => {{
+        let deadline = time::Instant::now() + Duration::from_secs($t);
+        let timed_out = 'out: loop {
+            if $b {
+                break 'out false;
+            }
+            if time::Instant::now() > deadline {
+                break 'out true;
+            }
+        };
+        !timed_out
+    }};
+    ($t:expr,  $b: block, $delay:expr) => {{
+        let deadline = time::Instant::now() + Duration::from_secs($t);
+        let timed_out = 'out: loop {
+            if $b {
+                break 'out false;
+            }
+            if time::Instant::now() > deadline {
+                break 'out true;
+            }
+            Delay::new().delay_millis($delay);
+        };
+        !timed_out
+    }};
+}
 
 extern crate alloc;
 use core::net::Ipv4Addr;
@@ -23,7 +50,7 @@ use esp_hal::{
     time::{self, Duration},
     timer::timg::TimerGroup,
 };
-use esp_println::{print, println};
+use esp_println::println;
 use esp_radio::wifi::{ClientConfig, ModeConfig};
 use esp_rtos as _;
 use smoltcp::{
@@ -47,6 +74,7 @@ const _SLIDE_IP: &str = "192.168.68.104";
 fn main() -> ! {
     esp_println::logger::init_logger_from_env();
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
+    // The HAL peripherals is mutable to allow repurposing the button pin in the course of the program
     let mut peripherals = esp_hal::init(config);
     let mut rtc = Rtc::new(peripherals.LPWR);
     let mut green_led = Output::new(peripherals.GPIO8, Level::Low, OutputConfig::default());
@@ -89,9 +117,13 @@ fn main() -> ! {
     let delay = Delay::new();
 
     // All configurations are now set
-    // Open a block that uses the memory to execute wifi. Leaving the block
-    // will gracefully shut down the wifi driver and free associated resources
-    // to prevent problems at waking up from (deep) sleep.
+    //
+    // Open a block tagged 'wifi that encapsulates the wifi interaction.
+    // Leaving the block will shut down the wifi driver, free associated resources
+    // and free the reborrowed pin for the button,
+    // (1) to allow for further repurposing the pin of the button after this block.
+    // (2) to allow for a graceful shutdown of the wifi driver to avoid spurious wifi problems
+
     'wifi: {
         let esp_radio_ctrl = esp_radio::init().unwrap();
 
@@ -136,38 +168,37 @@ fn main() -> ! {
         println!("{:?}", controller.capabilities());
         println!("wifi connecting... {:?}", controller.connect());
 
-        // wait to get connected, no longer then 12 seconds
-        let deadline = time::Instant::now() + Duration::from_secs(5);
-        loop {
+        // wait to get connected, no longer then 5 seconds
+        let success = timed_loop!(5, {
             match controller.is_connected() {
-                Ok(true) => break,
-                Ok(false) => {}
+                Ok(true) => true,
+                Ok(false) => false,
                 Err(err) => {
                     println!("{:?}", err);
                     delay.delay_millis(2000u32);
+                    false
                 }
             }
-            if time::Instant::now() > deadline {
-                println!("Timeout connecting to wifi");
-                break 'wifi;
-            }
-        }
+        });
+        if !success {
+            break 'wifi;
+        };
         println!("Wifi connected:{:?}", controller.is_connected());
 
         // wait for getting an ip address
         println!("Wait to get an ip address");
-        let deadline = time::Instant::now() + Duration::from_secs(12);
-        loop {
+        let success = timed_loop!(12, {
             stack.work();
             if stack.is_iface_up() {
                 println!("got ip {:?}", stack.get_ip_info());
-                break;
+                true
+            } else {
+                false
             }
-            if time::Instant::now() > deadline {
-                println!("Timeout getting IP address");
-                break 'wifi;
-            }
-        }
+        });
+        if !success {
+            break 'wifi;
+        };
 
         let mut rx_buffer = [0u8; 1536];
         let mut tx_buffer = [0u8; 1536];
@@ -263,32 +294,29 @@ fn slide_communication<'a, 's, 'n, D: smoltcp::phy::Device>(
         socket.flush().unwrap();
         socket.work();
         check_button_pressed(button_pin, red_led);
-        let deadline = time::Instant::now() + Duration::from_secs(20);
-        loop {
+        let _success = timed_loop!(20, {
             socket.work();
             check_button_pressed(button_pin, red_led);
             let mut buffer = [0u8; 1024];
             if let Ok(len) = socket.read(&mut buffer) {
                 println!("\n------------ len is {len}  ------------");
-                print!("{}", core::str::from_utf8(&buffer[..len]).unwrap()); // there might be more data, continue reading
-                break;
-            };
-            if time::Instant::now() > deadline {
-                println!("Timeout");
-                break;
+                println!("{}", core::str::from_utf8(&buffer[..len]).unwrap()); // there might be more data, continue reading
+                true
+            } else {
+                false
             }
-        }
+        });
         println!("Bye1 socket is still open {}", socket.is_open());
         //        sta_socket.disconnect();
-        let deadline = time::Instant::now() + Duration::from_secs(3);
-        loop {
-            socket.work();
-            check_button_pressed(button_pin, red_led);
-            if time::Instant::now() > deadline {
-                break;
-            }
-            delay.delay_millis(200u32);
-        }
+        let _success = timed_loop!(
+            3,
+            {
+                socket.work();
+                check_button_pressed(button_pin, red_led);
+                false
+            },
+            200u32
+        );
         green_led.set_high();
         delay.delay_millis(500u32);
     }
