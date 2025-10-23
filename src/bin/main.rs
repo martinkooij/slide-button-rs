@@ -209,6 +209,7 @@ fn goto_deepsleep(rtc: &mut Rtc, pin_wake_source: &dyn WakeSource) -> ! {
 
 fn check_button_pressed<'a>(button_pin: &mut Input<'a>, red_led: &mut Output<'a>) {
     //button is active low
+    println!("Checking button state...");
     if button_pin.is_low() {
         println!("Button is pressed!");
         red_led.toggle();
@@ -279,7 +280,15 @@ fn slide_communication<'a, 's, 'n, D: smoltcp::phy::Device>(
         }
         println!("Bye1 socket is still open {}", socket.is_open());
         //        sta_socket.disconnect();
-        delay.delay_millis(3000u32);
+        let deadline = time::Instant::now() + Duration::from_secs(3);
+        loop {
+            socket.work();
+            check_button_pressed(button_pin, red_led);
+            if time::Instant::now() > deadline {
+                break;
+            }
+            delay.delay_millis(200u32);
+        }
         green_led.set_high();
         delay.delay_millis(500u32);
     }
