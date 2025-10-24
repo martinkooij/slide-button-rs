@@ -31,6 +31,8 @@ macro_rules! timed_loop {
 extern crate alloc;
 use core::net::Ipv4Addr;
 use core::str::FromStr;
+use serde::Deserialize;
+use serde_json_core as json;
 
 use blocking_network_stack::Stack;
 use embedded_io::*;
@@ -60,6 +62,19 @@ use smoltcp::{
     time::Duration as SmolDuration,
     wire::{DhcpOption, IpAddress},
 };
+#[derive(Deserialize)]
+#[allow(unused)]
+struct SlideData<'b> {
+    slide_id: &'b str,
+    mac: &'b str,
+    board_rev: u8,
+    device_name: &'b str,
+    zone_name: &'b str,
+    curtain_type: u8,
+    calib_time: u32,
+    pos: f32,
+    touch_go: bool,
+}
 
 esp_bootloader_esp_idf::esp_app_desc!();
 // just do a reset on panic
@@ -69,7 +84,10 @@ fn panic(_: &core::panic::PanicInfo) -> ! {
 }
 const SSID: &str = env!("SSID");
 const PASSWORD: &str = env!("PASSWORD");
-const SLIDE_IP: &str = "192.168.68.104";
+// const SLIDE_IP: &str = "192.168.68.104";
+// const SLIDE_PORT: u16 = 80;
+const SLIDE_IP: &str = "80.114.243.107";
+const SLIDE_PORT: u16 = 12012;
 
 #[main]
 fn main() -> ! {
@@ -246,7 +264,7 @@ fn goto_deepsleep(rtc: &mut Rtc, pin_wake_source: &dyn WakeSource) -> ! {
 
 fn check_button_pressed<'a>(button_pin: &mut Input<'a>, red_led: &mut Output<'a>) {
     //button is active low
-    println!("Checking button state...");
+    // println!("Checking button state...");
     if button_pin.is_low() {
         println!("Button is pressed!");
         red_led.toggle();
@@ -278,7 +296,10 @@ fn slide_communication<'a, 's, 'n, D: smoltcp::phy::Device>(
     socket.work();
 
     if socket
-        .open(IpAddress::Ipv4(Ipv4Addr::from_str(SLIDE_IP).unwrap()), 80)
+        .open(
+            IpAddress::Ipv4(Ipv4Addr::from_str(SLIDE_IP).unwrap()),
+            SLIDE_PORT,
+        )
         .is_err()
     {
         println!("Error opening socket");
@@ -311,7 +332,16 @@ fn slide_communication<'a, 's, 'n, D: smoltcp::phy::Device>(
             let mut buffer = [0u8; 1024];
             if let Ok(len) = socket.read(&mut buffer) {
                 println!("\n------------ len is {len}  ------------");
-                println!("{}", core::str::from_utf8(&buffer[..len]).unwrap()); // there might be more data, continue reading
+                let str_slice = core::str::from_utf8(&buffer[..len]).unwrap();
+                println!("{}", str_slice);
+                let possible = json::from_slice::<SlideData<'_>>(
+                    &buffer[str_slice.find('{').unwrap_or(0)..len],
+                );
+                if let Ok((data, _remainder)) = possible {
+                    println!("Position = {}", data.pos);
+                } else {
+                    println!("Could not parse json data due to {:?}", possible.err());
+                }
                 true
             } else {
                 false

@@ -56,8 +56,9 @@ smoltcp = { version = "0.12.0", default-features = false, features = [
   "socket-udp",
 ] }
 blocking-network-stack = { git = "https://github.com/bjoernQ/blocking-network-stack.git", rev = "b3ecefc" }
-
-
+serde-json-core = "0.6.0"
+serde = { version = "1.0.228", default-features = false, features = ["derive"] }
+serde_derive = "1.0.228"
 [profile.dev]
 # Rust debug is too slow.
 # For debug builds always builds with some optimization
