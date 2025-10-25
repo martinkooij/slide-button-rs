@@ -1,34 +1,11 @@
 #![no_std]
 #![no_main]
-macro_rules! timed_loop {
-    ($t:expr,  $b: expr) => {{
-        let deadline = time::Instant::now() + Duration::from_secs($t);
-        let timed_out = 'out: loop {
-            if $b {
-                break 'out false;
-            }
-            if time::Instant::now() > deadline {
-                break 'out true;
-            }
-        };
-        !timed_out
-    }};
-    ($t:expr,  $b: block, $delay:expr) => {{
-        let deadline = time::Instant::now() + Duration::from_secs($t);
-        let timed_out = 'out: loop {
-            if $b {
-                break 'out false;
-            }
-            if time::Instant::now() > deadline {
-                break 'out true;
-            }
-            Delay::new().delay_millis($delay);
-        };
-        !timed_out
-    }};
-}
 
 extern crate alloc;
+use core::cell::Cell;
+use critical_section::Mutex;
+mod util;
+use crate::util::timed_loop;
 use core::net::Ipv4Addr;
 use core::str::FromStr;
 use serde::Deserialize;
@@ -45,14 +22,13 @@ use esp_hal::{
     main, ram,
     rng::Rng,
     rtc_cntl::{
-        Rtc, SocResetReason, reset_reason,
+        Rtc,
         sleep::{RtcioWakeupSource, TimerWakeupSource, WakeSource, WakeupLevel},
-        wakeup_cause,
     },
-    system::Cpu,
-    time::{self, Duration},
+    time,
     timer::timg::TimerGroup,
 };
+
 use esp_println::println;
 use esp_radio::wifi::{ClientConfig, ModeConfig};
 use esp_rtos as _;
@@ -75,6 +51,7 @@ struct SlideData<'b> {
     pos: f32,
     touch_go: bool,
 }
+static B_PRESSED: Mutex<Cell<bool>> = Mutex::new(Cell::new(false));
 
 esp_bootloader_esp_idf::esp_app_desc!();
 // just do a reset on panic
@@ -84,10 +61,11 @@ fn panic(_: &core::panic::PanicInfo) -> ! {
 }
 const SSID: &str = env!("SSID");
 const PASSWORD: &str = env!("PASSWORD");
-// const SLIDE_IP: &str = "192.168.68.104";
-// const SLIDE_PORT: u16 = 80;
-const SLIDE_IP: &str = "80.114.243.107";
-const SLIDE_PORT: u16 = 12012;
+const SLIDE_IP: &str = "192.168.68.104";
+const SLIDE_PORT: u16 = 80;
+// const SLIDE_IP: &str = "80.114.243.107";
+// const SLIDE_PORT: u16 = 12012;
+// Outside
 
 #[main]
 fn main() -> ! {
@@ -96,32 +74,9 @@ fn main() -> ! {
     // The HAL peripherals is mutable to allow repurposing the button pin in the course of the program
     let mut peripherals = esp_hal::init(config);
     let mut rtc = Rtc::new(peripherals.LPWR);
-    let mut green_led = Output::new(peripherals.GPIO8, Level::Low, OutputConfig::default());
     let mut red_led = Output::new(peripherals.GPIO10, Level::Low, OutputConfig::default());
-
-    green_led.set_low();
     red_led.set_low();
-    let reason = reset_reason(Cpu::ProCpu).unwrap_or(SocResetReason::ChipPowerOn);
-    let wake_reason = wakeup_cause();
-    println!("reset reason: {:?}", reason);
-    println!("wake reason: {:?}", wake_reason);
-    match wake_reason {
-        esp_hal::system::SleepSource::Timer => {
-            println!("woke up from timer");
-            red_led.set_high();
-            green_led.set_high();
-        }
-        esp_hal::system::SleepSource::Gpio => {
-            println!("woke up from gpio");
-            red_led.set_high();
-            green_led.set_high();
-        }
-        _ => {
-            println!("not a timer wakeup");
-            green_led.set_high();
-            red_led.set_low();
-        }
-    }
+
     esp_alloc::heap_allocator!(#[ram(reclaimed)] size: 64 * 1024);
     esp_alloc::heap_allocator!(size: 36 * 1024);
 
@@ -133,7 +88,6 @@ fn main() -> ! {
         #[cfg(target_arch = "riscv32")]
         sw_int.software_interrupt0,
     );
-    let delay = Delay::new();
 
     // All configurations are now set
     //
@@ -145,6 +99,7 @@ fn main() -> ! {
 
     'wifi: {
         let esp_radio_ctrl = esp_radio::init().unwrap();
+        red_led.set_high();
 
         let (mut controller, interfaces) =
             esp_radio::wifi::new(&esp_radio_ctrl, peripherals.WIFI, Default::default()).unwrap();
@@ -194,7 +149,7 @@ fn main() -> ! {
                 Ok(false) => false,
                 Err(err) => {
                     println!("{:?}", err);
-                    delay.delay_millis(2000u32);
+                    Delay::new().delay_millis(1000u32);
                     false
                 }
             }
@@ -225,41 +180,29 @@ fn main() -> ! {
 
         println!("Start  main work.");
         let mut button_pin_input = Input::new(
-            peripherals.GPIO2.reborrow(),
-            InputConfig::default().with_pull(Pull::Up),
+            peripherals.GPIO0.reborrow(),
+            InputConfig::default().with_pull(Pull::Down),
         );
-        let success = slide_communication(
-            &mut socket,
-            &mut green_led,
-            &mut red_led,
-            &mut button_pin_input,
-        );
-        // just to be sure ;-)
+        slide_communication(&mut socket, &mut red_led, &mut button_pin_input);
+        // always break down just to be sure ;-)
         core::mem::drop(button_pin_input);
-
-        if !success {
-            break 'wifi;
-        };
-
         let _ = controller.disconnect();
         let _ = controller.stop();
     } //drop wifi and associated resources
 
-    green_led.set_low();
+    // goto deepsleep
     red_led.set_low();
-    let mut button_pin_wake = peripherals.GPIO2.reborrow();
+    let mut button_pin_wake = peripherals.GPIO0.reborrow();
     let wakeup_pins: &mut [(&mut dyn gpio::RtcPinWithResistors, WakeupLevel)] =
-        &mut [(&mut button_pin_wake, WakeupLevel::Low)];
-
+        &mut [(&mut button_pin_wake, WakeupLevel::High)];
     let rtcio = RtcioWakeupSource::new(wakeup_pins);
     goto_deepsleep(&mut rtc, &rtcio);
 }
 
 fn goto_deepsleep(rtc: &mut Rtc, pin_wake_source: &dyn WakeSource) -> ! {
     println!("Going to deep sleep now");
-    Delay::new().delay_millis(100u32);
-    let timer = TimerWakeupSource::new(core::time::Duration::from_secs(15));
-    rtc.sleep_deep(&[&timer, pin_wake_source]);
+    Delay::new().delay_millis(75u32);
+    rtc.sleep_deep(&[pin_wake_source]);
 }
 
 fn check_button_pressed<'a>(button_pin: &mut Input<'a>, red_led: &mut Output<'a>) {
@@ -280,19 +223,14 @@ fn check_button_pressed<'a>(button_pin: &mut Input<'a>, red_led: &mut Output<'a>
 
 fn slide_communication<'a, 's, 'n, D: smoltcp::phy::Device>(
     socket: &mut blocking_network_stack::Socket<'s, 'n, D>,
-    green_led: &mut Output<'a>,
     red_led: &mut Output<'a>,
     button_pin: &mut Input<'a>,
-) -> bool {
-    let delay = Delay::new();
-    println!("Making HTTP request");
+) -> () {
+    let open_request = b"\r\nPOST /rpc/Slide.SetPos HTTP/1.1\r\nAccept: */*\r\nContent-Type: application/json\r\nConnection: keep-alive\r\nContent-Length: 11\r\n\r\n{\"pos\":0.0}\r\n";
+    let close_request = b"\r\nPOST /rpc/Slide.SetPos HTTP/1.1\r\nAccept: */*\r\nContent-Type: application/json\r\nConnection: keep-alive\r\nContent-Length: 11\r\n\r\n{\"pos\":1.0}\r\n";
+    let stop_request = b"\r\nPOST /rpc/Slide.Stop HTTP/1.1\r\nAccept: */*\r\nContent-Type: application/json\r\nConnection: keep-alive\r\nContent-Length: 0\r\n\r\n";
 
-    // let postreq = b"\r\nPOST /rpc/Slide.SetPos HTTP/1.1\r\nAccept: */*\r\nContent-Type: application/json\r\nContent-Length: 11\r\n\r\n{\"pos\":0.8}\r\n";
-    let postreq = b"\r\nPOST /rpc/Slide.GetInfo HTTP/1.1\r\nAccept: */*\r\nContent-Type: application/json\r\nConnection: keep-alive\r\nContent-Length: 0\r\n\r\n";
-
-    socket.work();
     println!("Opening socket connection");
-    check_button_pressed(button_pin, red_led);
     socket.work();
 
     if socket
@@ -303,68 +241,79 @@ fn slide_communication<'a, 's, 'n, D: smoltcp::phy::Device>(
         .is_err()
     {
         println!("Error opening socket");
-        return false;
+        return;
     }
 
-    for _i in 1..=2 {
-        green_led.set_low();
-        socket.work();
-        check_button_pressed(button_pin, red_led);
-
-        println!(
-            "Sending request: {}",
-            core::str::from_utf8(postreq).unwrap()
-        );
-        socket.work();
-        match socket.write(postreq) {
-            Ok(len) => println!("Wrote {len} bytes"),
-            Err(e) => {
-                println!("Error on write {e:?}");
-                return false;
-            }
-        }
-        socket.flush().unwrap();
-        socket.work();
-        check_button_pressed(button_pin, red_led);
-        let _success = timed_loop!(20, {
-            socket.work();
-            check_button_pressed(button_pin, red_led);
-            let mut buffer = [0u8; 1024];
-            if let Ok(len) = socket.read(&mut buffer) {
-                println!("\n------------ len is {len}  ------------");
-                let str_slice = core::str::from_utf8(&buffer[..len]).unwrap();
-                println!("{}", str_slice);
-                let possible = json::from_slice::<SlideData<'_>>(
-                    &buffer[str_slice.find('{').unwrap_or(0)..len],
-                );
-                if let Ok((data, _remainder)) = possible {
-                    println!("Position = {}", data.pos);
-                } else {
-                    println!("Could not parse json data due to {:?}", possible.err());
-                }
-                true
-            } else {
-                false
-            }
-        });
-        println!("Bye1 socket is still open {}", socket.is_open());
-        //        sta_socket.disconnect();
-        let _success = timed_loop!(
-            3,
-            {
-                socket.work();
-                check_button_pressed(button_pin, red_led);
-                false
-            },
-            200u32
-        );
-        green_led.set_high();
-        delay.delay_millis(500u32);
+    for _i in 0..10 {
+        let result = get_slide_position(socket);
+        println!("result = {:?}", result);
+        println!("socket is still open? {}", socket.is_open());
+        Delay::new().delay_millis(2000u32);
+        red_led.toggle();
     }
     socket.close();
     socket.disconnect();
-    println!("Done\n");
-    true
+    println!("Done slide communication\n");
+    Delay::new().delay_millis(500u32);
+}
+
+fn compare(f1: f32, f2: f32) -> bool {
+    let diff = if f1 > f2 { f1 - f2 } else { f2 - f1 };
+    diff < 0.01
+}
+
+fn get_slide_position<'a, 'n, D: smoltcp::phy::Device>(
+    socket: &mut blocking_network_stack::Socket<'a, 'n, D>,
+) -> Result<f32, ()> {
+    let position_request = b"\r\nPOST /rpc/Slide.GetInfo HTTP/1.1\r\nAccept: */*\r\nContent-Type: application/json\r\nConnection: keep-alive\r\nContent-Length: 0\r\n\r\n";
+    let mut buffer = [0u8; 1024];
+    let len = request_and_wait_for_answer(socket, position_request, &mut buffer)?;
+    let str_slice = core::str::from_utf8(&buffer[..len]).unwrap();
+    println!("{}", str_slice);
+    let possible =
+        json::from_slice::<SlideData<'_>>(&buffer[str_slice.find('{').unwrap_or(0)..len]);
+    if let Ok((slide_data, _)) = possible {
+        Ok(slide_data.pos)
+    } else {
+        println!("Could not parse json data due to {:?}", possible.err());
+        Err(())
+    }
+}
+
+fn request_and_wait_for_answer<'a, 'n, D: smoltcp::phy::Device>(
+    socket: &mut blocking_network_stack::Socket<'a, 'n, D>,
+    request: &[u8],
+    response_buffer: &mut [u8; 1024],
+) -> Result<usize, ()> {
+    socket.work();
+    match socket.write(request) {
+        Ok(len) => println!("Wrote {len} bytes"),
+        Err(e) => {
+            println!("Error on write {e:?}");
+            return Err(());
+        }
+    }
+    socket.flush().unwrap();
+    socket.work();
+
+    let mut length: usize = 0;
+    let success = timed_loop!(20, {
+        socket.work();
+        if let Ok(len) = socket.read(response_buffer) {
+            println!("\n------------ len is {len}  ------------");
+            let str_slice = core::str::from_utf8(&response_buffer[..len]).unwrap();
+            println!("{}", str_slice);
+            length = len;
+            true
+        } else {
+            false
+        }
+    });
+    if !success {
+        println!("Timed out waiting for response");
+        return Err(());
+    }
+    Ok(length)
 }
 
 //some smoltcp boilerplate
