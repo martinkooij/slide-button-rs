@@ -23,7 +23,7 @@ use esp_hal::{
     rng::Rng,
     rtc_cntl::{
         Rtc,
-        sleep::{RtcioWakeupSource, TimerWakeupSource, WakeSource, WakeupLevel},
+        sleep::{RtcioWakeupSource, WakeSource, WakeupLevel},
     },
     time,
     timer::timg::TimerGroup,
@@ -51,7 +51,6 @@ struct SlideData<'b> {
     pos: f32,
     touch_go: bool,
 }
-static B_PRESSED: Mutex<Cell<bool>> = Mutex::new(Cell::new(false));
 
 esp_bootloader_esp_idf::esp_app_desc!();
 // just do a reset on panic
@@ -65,7 +64,12 @@ const SLIDE_IP: &str = "192.168.68.104";
 const SLIDE_PORT: u16 = 80;
 // const SLIDE_IP: &str = "80.114.243.107";
 // const SLIDE_PORT: u16 = 12012;
-// Outside
+static B_PRESSED: Mutex<Cell<bool>> = Mutex::new(Cell::new(false));
+enum SlideCommand {
+    Open,
+    Close,
+    Stop,
+}
 
 #[main]
 fn main() -> ! {
@@ -226,23 +230,26 @@ fn slide_communication<'a, 's, 'n, D: smoltcp::phy::Device>(
     red_led: &mut Output<'a>,
     button_pin: &mut Input<'a>,
 ) -> () {
-    let open_request = b"\r\nPOST /rpc/Slide.SetPos HTTP/1.1\r\nAccept: */*\r\nContent-Type: application/json\r\nConnection: keep-alive\r\nContent-Length: 11\r\n\r\n{\"pos\":0.0}\r\n";
-    let close_request = b"\r\nPOST /rpc/Slide.SetPos HTTP/1.1\r\nAccept: */*\r\nContent-Type: application/json\r\nConnection: keep-alive\r\nContent-Length: 11\r\n\r\n{\"pos\":1.0}\r\n";
-    let stop_request = b"\r\nPOST /rpc/Slide.Stop HTTP/1.1\r\nAccept: */*\r\nContent-Type: application/json\r\nConnection: keep-alive\r\nContent-Length: 0\r\n\r\n";
-
-    println!("Opening socket connection");
-    socket.work();
-
-    if socket
-        .open(
-            IpAddress::Ipv4(Ipv4Addr::from_str(SLIDE_IP).unwrap()),
-            SLIDE_PORT,
-        )
-        .is_err()
-    {
-        println!("Error opening socket");
+    let start_position = if let Ok(pos) = get_slide_position(socket) {
+        pos
+    } else {
         return;
-    }
+    };
+    println!("Start position = {}", start_position);
+    if start_position < 0.5 {
+        println!("Slide is open, closing it");
+        if set_slide_position(socket, SlideCommand::Close).is_err() {
+            return;
+        };
+    } else {
+        println!("Slide is closed, opening it");
+        if set_slide_position(socket, SlideCommand::Open).is_err() {
+            return;
+        }
+    };
+    Delay::new().delay_millis(500u32);
+    println!("Showing for slide to move...");
+    Delay::new().delay_millis(1000u32);
 
     for _i in 0..10 {
         let result = get_slide_position(socket);
@@ -280,11 +287,48 @@ fn get_slide_position<'a, 'n, D: smoltcp::phy::Device>(
     }
 }
 
+fn set_slide_position<'a, 'n, D: smoltcp::phy::Device>(
+    socket: &mut blocking_network_stack::Socket<'a, 'n, D>,
+    command: SlideCommand,
+) -> Result<(), ()> {
+    let request = match command {
+        SlideCommand::Open => {
+            b"\r\nPOST /rpc/Slide.SetPos HTTP/1.1\r\nAccept: */*\r\nContent-Type: application/json\r\nConnection: keep-alive\r\nContent-Length: 11\r\n\r\n{\"pos\":0.0}\r\n"
+        }
+        SlideCommand::Close => {
+            b"\r\nPOST /rpc/Slide.SetPos HTTP/1.1\r\nAccept: */*\r\nContent-Type: application/json\r\nConnection: keep-alive\r\nContent-Length: 11\r\n\r\n{\"pos\":1.0}\r\n"
+        }
+        SlideCommand::Stop => {
+            b"\r\nPOST /rpc/Slide.Stop HTTP/1.1\r\nAccept: */*\r\nContent-Type: application/json\r\nConnection: keep-alive\r\nContent-Length: 0\r\n\r\n                "
+        }
+    };
+    let mut buffer = [0u8; 1024];
+    let _len = request_and_wait_for_answer(socket, request, &mut buffer)?;
+    Ok(())
+}
+
 fn request_and_wait_for_answer<'a, 'n, D: smoltcp::phy::Device>(
     socket: &mut blocking_network_stack::Socket<'a, 'n, D>,
     request: &[u8],
     response_buffer: &mut [u8; 1024],
 ) -> Result<usize, ()> {
+    println!("Sending request. Socket still open? {}", socket.is_open());
+    socket.work();
+    if socket.is_open() {
+        socket.work();
+        socket.close();
+        socket.disconnect();
+    };
+    if socket
+        .open(
+            IpAddress::Ipv4(Ipv4Addr::from_str(SLIDE_IP).unwrap()),
+            SLIDE_PORT,
+        )
+        .is_err()
+    {
+        println!("Error opening socket");
+        return Err(());
+    };
     socket.work();
     match socket.write(request) {
         Ok(len) => println!("Wrote {len} bytes"),
@@ -297,18 +341,24 @@ fn request_and_wait_for_answer<'a, 'n, D: smoltcp::phy::Device>(
     socket.work();
 
     let mut length: usize = 0;
-    let success = timed_loop!(20, {
+    let success = timed_loop!(5, {
         socket.work();
         if let Ok(len) = socket.read(response_buffer) {
             println!("\n------------ len is {len}  ------------");
             let str_slice = core::str::from_utf8(&response_buffer[..len]).unwrap();
             println!("{}", str_slice);
+            Delay::new().delay_millis(100u32);
             length = len;
+            socket.flush().unwrap();
+            socket.work();
             true
         } else {
             false
         }
     });
+    socket.work();
+    socket.close();
+    socket.disconnect();
     if !success {
         println!("Timed out waiting for response");
         return Err(());
