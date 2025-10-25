@@ -2,12 +2,12 @@
 #![no_main]
 
 extern crate alloc;
-use core::cell::Cell;
-use critical_section::Mutex;
 mod util;
 use crate::util::timed_loop;
+use core::cell::Cell;
 use core::net::Ipv4Addr;
 use core::str::FromStr;
+use critical_section::Mutex;
 use serde::Deserialize;
 use serde_json_core as json;
 
