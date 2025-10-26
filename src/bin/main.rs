@@ -4,10 +4,8 @@
 extern crate alloc;
 mod util;
 use crate::util::timed_loop;
-use core::cell::Cell;
 use core::net::Ipv4Addr;
 use core::str::FromStr;
-use critical_section::Mutex;
 use serde::Deserialize;
 use serde_json_core as json;
 
@@ -24,6 +22,7 @@ use esp_hal::{
     rtc_cntl::{
         Rtc,
         sleep::{RtcioWakeupSource, WakeSource, WakeupLevel},
+        wakeup_cause,
     },
     time,
     timer::timg::TimerGroup,
@@ -64,7 +63,6 @@ const SLIDE_IP: &str = "192.168.68.104";
 const SLIDE_PORT: u16 = 80;
 // const SLIDE_IP: &str = "80.114.243.107";
 // const SLIDE_PORT: u16 = 12012;
-static B_PRESSED: Mutex<Cell<bool>> = Mutex::new(Cell::new(false));
 enum SlideCommand {
     Open,
     Close,
@@ -102,12 +100,23 @@ fn main() -> ! {
     // (2) to allow for a graceful shutdown of the wifi driver to avoid spurious wifi problems
 
     'wifi: {
+        // if we enter this block because of any other wakeup reason
+        // then button interrupt skip the interaction part and goto deepsleep again
+        let wake_reason = wakeup_cause();
+        println!("wake reason: {:?}", wake_reason);
+        match wake_reason {
+            esp_hal::system::SleepSource::Gpio => {
+                println!("woke up from gpio");
+                red_led.set_high();
+            }
+            _ => {
+                println!("not a timer wakeup");
+                break 'wifi;
+            }
+        }
         let esp_radio_ctrl = esp_radio::init().unwrap();
-        red_led.set_high();
-
         let (mut controller, interfaces) =
             esp_radio::wifi::new(&esp_radio_ctrl, peripherals.WIFI, Default::default()).unwrap();
-
         let mut sta_device = interfaces.sta;
         let sta_iface = create_interface(&mut sta_device);
 
@@ -209,32 +218,18 @@ fn goto_deepsleep(rtc: &mut Rtc, pin_wake_source: &dyn WakeSource) -> ! {
     rtc.sleep_deep(&[pin_wake_source]);
 }
 
-fn check_button_pressed<'a>(button_pin: &mut Input<'a>, red_led: &mut Output<'a>) {
-    //button is active low
-    // println!("Checking button state...");
-    if button_pin.is_low() {
-        println!("Button is pressed!");
-        red_led.toggle();
-        loop {
-            if button_pin.is_high() {
-                println!("Button released, exiting loop");
-                break;
-            }
-            Delay::new().delay_millis(50u32);
-        }
-    }
-}
-
 fn slide_communication<'a, 's, 'n, D: smoltcp::phy::Device>(
     socket: &mut blocking_network_stack::Socket<'s, 'n, D>,
     red_led: &mut Output<'a>,
     button_pin: &mut Input<'a>,
 ) -> () {
+    red_led.set_low();
     let start_position = if let Ok(pos) = get_slide_position(socket) {
         pos
     } else {
         return;
     };
+    red_led.set_high();
     println!("Start position = {}", start_position);
     if start_position < 0.5 {
         println!("Slide is open, closing it");
@@ -247,17 +242,22 @@ fn slide_communication<'a, 's, 'n, D: smoltcp::phy::Device>(
             return;
         }
     };
-    Delay::new().delay_millis(500u32);
     println!("Showing for slide to move...");
-    Delay::new().delay_millis(1000u32);
 
-    for _i in 0..10 {
-        let result = get_slide_position(socket);
-        println!("result = {:?}", result);
-        println!("socket is still open? {}", socket.is_open());
-        Delay::new().delay_millis(2000u32);
+    let _not_timed_out = timed_loop!(40, 'button_loop: {
+        let deadline = time::Instant::now() + time::Duration::from_secs(4);
         red_led.toggle();
-    }
+        while time::Instant::now() < deadline {
+            if button_pin.is_high() {
+                println!("Button pressed during slide movement, stopping slide");
+                let _ = set_slide_position(socket, SlideCommand::Stop);
+                break 'button_loop true;
+            }
+            let result = get_slide_position(socket);
+            println!("result intermediate slide position= {:?}", result);
+        }
+        false
+    });
     socket.close();
     socket.disconnect();
     println!("Done slide communication\n");
