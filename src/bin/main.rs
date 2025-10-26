@@ -106,11 +106,11 @@ fn main() -> ! {
         println!("wake reason: {:?}", wake_reason);
         match wake_reason {
             esp_hal::system::SleepSource::Gpio => {
-                println!("woke up from gpio");
+                println!("woke up from button press");
                 red_led.set_high();
             }
             _ => {
-                println!("not a timer wakeup");
+                println!("not a button press wakeup");
                 break 'wifi;
             }
         }
@@ -204,7 +204,13 @@ fn main() -> ! {
     } //drop wifi and associated resources
 
     // goto deepsleep
+    println!("Going to deep sleep set_up");
     red_led.set_low();
+    let button_pin_input = Input::new(
+        peripherals.GPIO0.reborrow(),
+        InputConfig::default().with_pull(Pull::Down),
+    );
+    core::mem::drop(button_pin_input);
     let mut button_pin_wake = peripherals.GPIO0.reborrow();
     let wakeup_pins: &mut [(&mut dyn gpio::RtcPinWithResistors, WakeupLevel)] =
         &mut [(&mut button_pin_wake, WakeupLevel::High)];
@@ -224,14 +230,14 @@ fn slide_communication<'a, 's, 'n, D: smoltcp::phy::Device>(
     button_pin: &mut Input<'a>,
 ) -> () {
     red_led.set_low();
-    let start_position = if let Ok(pos) = get_slide_position(socket) {
+    let mut retrieved_position = if let Ok(pos) = get_slide_position(socket) {
         pos
     } else {
         return;
     };
     red_led.set_high();
-    println!("Start position = {}", start_position);
-    if start_position < 0.5 {
+    println!("Start position = {}", retrieved_position);
+    if retrieved_position < 0.5 {
         println!("Slide is open, closing it");
         if set_slide_position(socket, SlideCommand::Close).is_err() {
             return;
@@ -245,7 +251,12 @@ fn slide_communication<'a, 's, 'n, D: smoltcp::phy::Device>(
     println!("Showing for slide to move...");
 
     let _not_timed_out = timed_loop!(40, 'button_loop: {
-        let deadline = time::Instant::now() + time::Duration::from_secs(4);
+        // block waiting until button is not pressed anymore + bounce time
+        while button_pin.is_high() {
+            //busy_wait
+        }
+        Delay::new().delay_millis(75u32);
+        let deadline = time::Instant::now() + time::Duration::from_secs(3);
         red_led.toggle();
         while time::Instant::now() < deadline {
             if button_pin.is_high() {
@@ -253,8 +264,25 @@ fn slide_communication<'a, 's, 'n, D: smoltcp::phy::Device>(
                 let _ = set_slide_position(socket, SlideCommand::Stop);
                 break 'button_loop true;
             }
-            let result = get_slide_position(socket);
-            println!("result intermediate slide position= {:?}", result);
+        }
+        if let Ok(current_position) = get_slide_position(socket) {
+            if compare(current_position, retrieved_position) {
+                println!(
+                    "current position= {:?}, old position= {:?}",
+                    current_position, retrieved_position
+                );
+                //position did not change
+                println!("Slide position did not change, assuming it reached end position");
+                break 'button_loop true;
+            } else {
+                println!(
+                    "current position= {:?}, old position= {:?}",
+                    current_position, retrieved_position
+                );
+                retrieved_position = current_position;
+            }
+        } else {
+            println!("Could not get slide position");
         }
         false
     });
@@ -276,7 +304,6 @@ fn get_slide_position<'a, 'n, D: smoltcp::phy::Device>(
     let mut buffer = [0u8; 1024];
     let len = request_and_wait_for_answer(socket, position_request, &mut buffer)?;
     let str_slice = core::str::from_utf8(&buffer[..len]).unwrap();
-    println!("{}", str_slice);
     let possible =
         json::from_slice::<SlideData<'_>>(&buffer[str_slice.find('{').unwrap_or(0)..len]);
     if let Ok((slide_data, _)) = possible {
@@ -312,7 +339,7 @@ fn request_and_wait_for_answer<'a, 'n, D: smoltcp::phy::Device>(
     request: &[u8],
     response_buffer: &mut [u8; 1024],
 ) -> Result<usize, ()> {
-    println!("Sending request. Socket still open? {}", socket.is_open());
+    println!("Sending request. Socket open? {}", socket.is_open());
     socket.work();
     if socket.is_open() {
         socket.work();
@@ -344,9 +371,9 @@ fn request_and_wait_for_answer<'a, 'n, D: smoltcp::phy::Device>(
     let success = timed_loop!(5, {
         socket.work();
         if let Ok(len) = socket.read(response_buffer) {
-            println!("\n------------ len is {len}  ------------");
-            let str_slice = core::str::from_utf8(&response_buffer[..len]).unwrap();
-            println!("{}", str_slice);
+            println!("received {} bytes of http response", len);
+            // let str_slice = core::str::from_utf8(&response_buffer[..len]).unwrap();
+            // too much detail: println!("{}", str_slice);
             Delay::new().delay_millis(100u32);
             length = len;
             socket.flush().unwrap();
