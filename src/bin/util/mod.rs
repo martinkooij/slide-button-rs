@@ -1,6 +1,3 @@
-#![no_std]
-#![no_main]
-
 macro_rules! timed_loop {
     ($t:expr,  $b: expr) => {{
         let deadline = time::Instant::now() + time::Duration::from_secs($t);

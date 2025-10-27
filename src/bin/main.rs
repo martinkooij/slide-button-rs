@@ -21,7 +21,7 @@ use esp_hal::{
     rng::Rng,
     rtc_cntl::{
         Rtc,
-        sleep::{RtcioWakeupSource, WakeSource, WakeupLevel},
+        sleep::{RtcioWakeupSource, WakeupLevel},
         wakeup_cause,
     },
     time,
@@ -46,7 +46,7 @@ struct SlideData<'b> {
     device_name: &'b str,
     zone_name: &'b str,
     curtain_type: u8,
-    calib_time: u32,
+    calib_time: i64,
     pos: f32,
     touch_go: bool,
 }
@@ -71,6 +71,10 @@ enum SlideCommand {
 
 #[main]
 fn main() -> ! {
+    // ----------------------------------------------
+    // Initialization with a lot of boilerplate
+    // from esp-hal examples
+    // ----------------------------------------------
     esp_println::logger::init_logger_from_env();
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     // The HAL peripherals is mutable to allow repurposing the button pin in the course of the program
@@ -91,7 +95,9 @@ fn main() -> ! {
         sw_int.software_interrupt0,
     );
 
-    // All configurations are now set
+    // ----------------------------------------------
+    // Main Program Logic
+    // ----------------------------------------------
     //
     // Open a block tagged 'wifi that encapsulates the wifi interaction.
     // Leaving the block will shut down the wifi driver, free associated resources
@@ -114,6 +120,7 @@ fn main() -> ! {
                 break 'wifi;
             }
         }
+
         let esp_radio_ctrl = esp_radio::init().unwrap();
         let (mut controller, interfaces) =
             esp_radio::wifi::new(&esp_radio_ctrl, peripherals.WIFI, Default::default()).unwrap();
@@ -191,7 +198,10 @@ fn main() -> ! {
         let mut tx_buffer = [0u8; 1536];
         let mut socket = stack.get_socket(&mut rx_buffer, &mut tx_buffer);
 
-        println!("Start  main work.");
+        // --------------------------------------------
+        // Sliding curtain control
+        // --------------------------------------------
+        println!("Starting slide control");
         let mut button_pin_input = Input::new(
             peripherals.GPIO0.reborrow(),
             InputConfig::default().with_pull(Pull::Down),
@@ -203,25 +213,29 @@ fn main() -> ! {
         let _ = controller.stop();
     } //drop wifi and associated resources
 
-    // goto deepsleep
-    println!("Going to deep sleep set_up");
-    red_led.set_low();
+    // ----------------------------------------------
+    // Go to Deep Sleep, Low power usage mode
+    // ----------------------------------------------
+
+    println!("Setting things up for deep sleep");
+    //set the Pull down and Input type on the button pin
+    //needed because we might have skipped the wifi section
+    //and be left with uninitialsed button pin
+    //there is no harm in initialising it twice
+    //drop the input pin handler immedately to be able to reuse
     let button_pin_input = Input::new(
         peripherals.GPIO0.reborrow(),
         InputConfig::default().with_pull(Pull::Down),
     );
     core::mem::drop(button_pin_input);
+
     let mut button_pin_wake = peripherals.GPIO0.reborrow();
     let wakeup_pins: &mut [(&mut dyn gpio::RtcPinWithResistors, WakeupLevel)] =
         &mut [(&mut button_pin_wake, WakeupLevel::High)];
-    let rtcio = RtcioWakeupSource::new(wakeup_pins);
-    goto_deepsleep(&mut rtc, &rtcio);
-}
-
-fn goto_deepsleep(rtc: &mut Rtc, pin_wake_source: &dyn WakeSource) -> ! {
-    println!("Going to deep sleep now");
+    let pin_wake_source = RtcioWakeupSource::new(wakeup_pins);
+    println!("Setup done - going to deep sleep now");
     Delay::new().delay_millis(75u32);
-    rtc.sleep_deep(&[pin_wake_source]);
+    rtc.sleep_deep(&[&pin_wake_source]);
 }
 
 fn slide_communication<'a, 's, 'n, D: smoltcp::phy::Device>(
@@ -251,14 +265,22 @@ fn slide_communication<'a, 's, 'n, D: smoltcp::phy::Device>(
     println!("Showing for slide to move...");
 
     let _not_timed_out = timed_loop!(40, 'button_loop: {
-        // block waiting until button is not pressed anymore + bounce time
+        // block waiting until button is not pressed anymore + wait bounce time
         while button_pin.is_high() {
-            //busy_wait
+            //busy_wait until low
         }
         Delay::new().delay_millis(75u32);
-        let deadline = time::Instant::now() + time::Duration::from_secs(3);
-        red_led.toggle();
+        let mut start_time = time::Instant::now();
+        let deadline = start_time + time::Duration::from_secs(4);
+        red_led.set_low();
         while time::Instant::now() < deadline {
+            if start_time.elapsed() > time::Duration::from_millis(600) && button_pin.is_low() {
+                red_led.set_high();
+            };
+            if start_time.elapsed() > time::Duration::from_millis(800) {
+                red_led.set_low();
+                start_time = time::Instant::now();
+            };
             if button_pin.is_high() {
                 println!("Button pressed during slide movement, stopping slide");
                 let _ = set_slide_position(socket, SlideCommand::Stop);
@@ -304,6 +326,7 @@ fn get_slide_position<'a, 'n, D: smoltcp::phy::Device>(
     let mut buffer = [0u8; 1024];
     let len = request_and_wait_for_answer(socket, position_request, &mut buffer)?;
     let str_slice = core::str::from_utf8(&buffer[..len]).unwrap();
+    println!("Full response on info request: {}", str_slice);
     let possible =
         json::from_slice::<SlideData<'_>>(&buffer[str_slice.find('{').unwrap_or(0)..len]);
     if let Ok((slide_data, _)) = possible {
