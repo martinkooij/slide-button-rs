@@ -1,6 +1,13 @@
 #![no_std]
 #![no_main]
 
+/// esp-slide-rs: Hobby button for ESP32-S2/S3
+/// Controls the "Slide" curtain by a button press.
+/// When the button is pressed, the curtain will either open or close,
+/// depending on its current position. When moving, when the button is pressed again,
+/// the curtain will stop its movement
+///
+/// Martin Kooij 2025-06-10, MIT Licenced
 extern crate alloc;
 mod util;
 use crate::util::timed_loop;
@@ -326,7 +333,6 @@ fn get_slide_position<'a, 'n, D: smoltcp::phy::Device>(
     let mut buffer = [0u8; 1024];
     let len = request_and_wait_for_answer(socket, position_request, &mut buffer)?;
     let str_slice = core::str::from_utf8(&buffer[..len]).unwrap();
-    println!("Full response on info request: {}", str_slice);
     let possible =
         json::from_slice::<SlideData<'_>>(&buffer[str_slice.find('{').unwrap_or(0)..len]);
     if let Ok((slide_data, _)) = possible {
