@@ -35,7 +35,7 @@ use esp_hal::{
     timer::timg::TimerGroup,
 };
 
-use esp_println::println;
+use esp_println::{dbg, println};
 use esp_radio::wifi::{ClientConfig, ModeConfig};
 use esp_rtos as _;
 use smoltcp::{
@@ -347,19 +347,33 @@ fn set_slide_position<'a, 'n, D: smoltcp::phy::Device>(
     socket: &mut blocking_network_stack::Socket<'a, 'n, D>,
     command: SlideCommand,
 ) -> Result<(), ()> {
-    let request = match command {
+    match command {
         SlideCommand::Open => {
-            b"\r\nPOST /rpc/Slide.SetPos HTTP/1.1\r\nAccept: */*\r\nContent-Type: application/json\r\nConnection: keep-alive\r\nContent-Length: 11\r\n\r\n{\"pos\":0.0}\r\n"
+            let request = b"\r\nPOST /rpc/Slide.SetPos HTTP/1.1\r\nAccept: */*\r\nContent-Type: application/json\r\nConnection: keep-alive\r\nContent-Length: 11\r\n\r\n{\"pos\":0.0}\r\n";
+            let mut buffer = [0u8; 1024];
+            let _len = request_and_wait_for_answer(socket, request, &mut buffer)?;
+            Ok(())
         }
         SlideCommand::Close => {
-            b"\r\nPOST /rpc/Slide.SetPos HTTP/1.1\r\nAccept: */*\r\nContent-Type: application/json\r\nConnection: keep-alive\r\nContent-Length: 11\r\n\r\n{\"pos\":1.0}\r\n"
+            let request = b"\r\nPOST /rpc/Slide.SetPos HTTP/1.1\r\nAccept: */*\r\nContent-Type: application/json\r\nConnection: keep-alive\r\nContent-Length: 11\r\n\r\n{\"pos\":1.0}\r\n";
+            let mut buffer = [0u8; 1024];
+            let _len = request_and_wait_for_answer(socket, request, &mut buffer)?;
+            Ok(())
         }
-        SlideCommand::Stop => {
-            b"\r\nPOST /rpc/Slide.Stop HTTP/1.1\r\nAccept: */*\r\nContent-Type: application/json\r\nConnection: keep-alive\r\nContent-Length: 0\r\n\r\n                "
-        }
-    };
+        SlideCommand::Stop => soft_stop(socket),
+    }
+}
+
+fn soft_stop<'a, 'n, D: smoltcp::phy::Device>(
+    socket: &mut blocking_network_stack::Socket<'a, 'n, D>,
+) -> Result<(), ()> {
+    let pos_value = get_slide_position(socket)?;
+    let setposrequest = alloc::format!(
+        "\r\nPOST /rpc/Slide.SetPos HTTP/1.1\r\nAccept: */*\r\nContent-Type: application/json\r\nConnection: keep-alive\r\nContent-Length: 12\r\n\r\n{{\"pos\":{:.2}}}\r\n",
+        pos_value
+    );
     let mut buffer = [0u8; 1024];
-    let _len = request_and_wait_for_answer(socket, request, &mut buffer)?;
+    let _len = request_and_wait_for_answer(socket, &setposrequest.as_bytes(), &mut buffer)?;
     Ok(())
 }
 
@@ -369,6 +383,8 @@ fn request_and_wait_for_answer<'a, 'n, D: smoltcp::phy::Device>(
     response_buffer: &mut [u8; 1024],
 ) -> Result<usize, ()> {
     println!("Sending request. Socket open? {}", socket.is_open());
+    let printable_request = core::str::from_utf8(request).unwrap();
+    dbg!("Request to be sent:\n{}", printable_request);
     socket.work();
     if socket.is_open() {
         socket.work();
@@ -401,8 +417,8 @@ fn request_and_wait_for_answer<'a, 'n, D: smoltcp::phy::Device>(
         socket.work();
         if let Ok(len) = socket.read(response_buffer) {
             println!("received {} bytes of http response", len);
-            // let str_slice = core::str::from_utf8(&response_buffer[..len]).unwrap();
-            // too much detail: println!("{}", str_slice);
+            let str_slice = core::str::from_utf8(&response_buffer[..len]).unwrap();
+            dbg!("Response:{}", str_slice);
             Delay::new().delay_millis(100u32);
             length = len;
             socket.flush().unwrap();
