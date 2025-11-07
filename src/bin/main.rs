@@ -66,8 +66,8 @@ fn panic(_: &core::panic::PanicInfo) -> ! {
 }
 const SSID: &str = env!("SSID");
 const PASSWORD: &str = env!("PASSWORD");
-const SLIDE_IP: &str = "192.168.68.104";
-const SLIDE_PORT: u16 = 80;
+const SLIDE_IP: &str = env!("SLIDE_IP");
+const SLIDE_PORT: &str = env!("SLIDE_PORT");
 // const SLIDE_IP: &str = "80.114.243.107";
 // const SLIDE_PORT: u16 = 12012;
 enum SlideCommand {
@@ -79,7 +79,7 @@ enum SlideCommand {
 #[main]
 fn main() -> ! {
     // ----------------------------------------------
-    // Initialization with a lot of boilerplate
+    // Initialization with boilerplate
     // from esp-hal examples
     // ----------------------------------------------
     esp_println::logger::init_logger_from_env();
@@ -272,10 +272,11 @@ fn slide_communication<'a, 's, 'n, D: smoltcp::phy::Device>(
     println!("Showing for slide to move...");
 
     let _not_timed_out = timed_loop!(40, 'button_loop: {
-        // block waiting until button is not pressed anymore + wait bounce time
+        // block waiting until button is not pressed anymore
         while button_pin.is_high() {
             //busy_wait until low
         }
+        // sit out bouncing time
         Delay::new().delay_millis(75u32);
         let mut start_time = time::Instant::now();
         let deadline = start_time + time::Duration::from_secs(4);
@@ -318,7 +319,7 @@ fn slide_communication<'a, 's, 'n, D: smoltcp::phy::Device>(
     socket.close();
     socket.disconnect();
     println!("Done slide communication\n");
-    Delay::new().delay_millis(500u32);
+    Delay::new().delay_millis(200u32);
 }
 
 fn compare(f1: f32, f2: f32) -> bool {
@@ -394,7 +395,7 @@ fn request_and_wait_for_answer<'a, 'n, D: smoltcp::phy::Device>(
     if socket
         .open(
             IpAddress::Ipv4(Ipv4Addr::from_str(SLIDE_IP).unwrap()),
-            SLIDE_PORT,
+            SLIDE_PORT.parse().unwrap(),
         )
         .is_err()
     {
