@@ -68,8 +68,7 @@ const SSID: &str = env!("SSID");
 const PASSWORD: &str = env!("PASSWORD");
 const SLIDE_IP: &str = env!("SLIDE_IP");
 const SLIDE_PORT: &str = env!("SLIDE_PORT");
-// const SLIDE_IP: &str = "80.114.243.107";
-// const SLIDE_PORT: u16 = 12012;
+
 enum SlideCommand {
     Open,
     Close,
